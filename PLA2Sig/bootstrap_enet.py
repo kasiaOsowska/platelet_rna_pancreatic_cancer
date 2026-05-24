@@ -47,6 +47,7 @@ BASE_SEED           = 2137
 LOG2FC_THRESHOLD    = np.log2(1.2)
 DEG_PVAL            = 0.05
 ANOVA_FDR_THRESHOLD = 0.05
+MEAN_THRESHOLD = 5
 
 # tuning ENet (random search)
 TUNE_CV_FOLDS       = 50
@@ -67,6 +68,9 @@ N_JOBS              = -1
 
 OUT_CSV_GENES       = "bootstrap_enet_selected_genes.csv"
 OUT_PNG_INCR        = "stability_enet_incremental.png"
+OUT_CSV_THR         = "stability_threshold_counts.csv"
+OUT_CSV_STATS       = "stability_summary.csv"
+OUT_CSV_STABLE      = "stability_all_stable_genes.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +110,7 @@ def bootstrap_stability(X, y, enet_C, enet_l1_ratio,
     p = X.shape[1]
     selected_count = np.zeros(p, dtype=int)
     abs_coef_sums  = np.zeros(p, dtype=float)
+    signed_coef_sums = np.zeros(p, dtype=float)
 
     idx_pos = np.where(y == 1)[0]
     idx_neg = np.where(y == 0)[0]
@@ -129,6 +134,7 @@ def bootstrap_stability(X, y, enet_C, enet_l1_ratio,
         nz = coefs != 0
         selected_count += nz.astype(int)
         abs_coef_sums  += np.abs(coefs)
+        signed_coef_sums += coefs
         if (i + 1) % progress_every == 0 or i + 1 == n_iter:
             print(f"  [boot {i+1:>4}/{n_iter}]  n_selected={int(nz.sum())}")
 
@@ -138,7 +144,12 @@ def bootstrap_stability(X, y, enet_C, enet_l1_ratio,
         abs_coef_sums / np.maximum(selected_count, 1),
         0.0,
     )
-    return freq, mean_abs_coef
+    mean_signed_coef = np.where(
+        selected_count > 0,
+        signed_coef_sums / np.maximum(selected_count, 1),
+        0.0,
+    )
+    return freq, mean_abs_coef, mean_signed_coef
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +213,7 @@ def main():
 
         ('AnovaFDRReductor', AnovaFdrReductor(alpha=ANOVA_FDR_THRESHOLD)),
         #('Log2FCReductor', Log2FCReductor(min_abs_log2fc=LOG2FC_THRESHOLD)),
-        ('MeanExpressionReductor', MeanExpressionReductor(5)),
+        ('MeanExpressionReductor', MeanExpressionReductor(MEAN_THRESHOLD)),
         ('multi_resid', MultiCovariateResidualBootstrapTransformer(
             covariates=cov, labels=y_train,
             n_bootstrap=1000, fdr_alpha=0.05, min_r2=0.05, cv_threshold_pct=30.0,
@@ -228,17 +239,18 @@ def main():
     print(f"\n=== KROK 3: bootstrap stability "
           f"(N_ITER={N_ITER}, subsample={INNER_SUBSAMPLE:.0%}, "
           f"threshold={STABILITY_THRESHOLD:.0%}) ===")
-    freq, mean_abs_coef = bootstrap_stability(
+    freq, mean_abs_coef, mean_signed_coef = bootstrap_stability(
         X_tr_z, y_tr_np, enet_C, enet_l1,
         n_iter=N_ITER, subsample=INNER_SUBSAMPLE, seed=BASE_SEED,
     )
 
     stable_mask = freq >= STABILITY_THRESHOLD
     stable_df = (pd.DataFrame({
-        'gene':           [deg_genes[i] for i in np.where(stable_mask)[0]],
-        'freq':           freq[stable_mask],
-        'mean_abs_coef':  mean_abs_coef[stable_mask],
-        'score':          freq[stable_mask] * mean_abs_coef[stable_mask],
+        'gene':             [deg_genes[i] for i in np.where(stable_mask)[0]],
+        'freq':             freq[stable_mask],
+        'mean_abs_coef':    mean_abs_coef[stable_mask],
+        'mean_signed_coef': mean_signed_coef[stable_mask],
+        'score':            freq[stable_mask] * mean_abs_coef[stable_mask],
     }).sort_values('score', ascending=False).reset_index(drop=True))
 
     print(f"\n[stability] {int(stable_mask.sum())} / {len(deg_genes)} genow "
@@ -248,6 +260,36 @@ def main():
     if stable_mask.sum() == 0:
         print("\n[!] zaden gen nie przeszedl progu stability -- konczy.")
         return
+
+    # --- statystyki stabilnosci (zapis do CSV) ---
+    thresholds = [0.5, 0.7, 0.8, 0.9, 1.0]
+    thr_counts = pd.DataFrame({
+        'prog_freq': thresholds,
+        'n_genow':   [int((freq >= t).sum()) for t in thresholds],
+    })
+    thr_counts.to_csv(OUT_CSV_THR, index=False)
+    print("\n[stability] licznosc genow przy progach freq:")
+    print(thr_counts.to_string(index=False))
+
+    n_up   = int((stable_df['mean_signed_coef'] > 0).sum())
+    n_down = int((stable_df['mean_signed_coef'] < 0).sum())
+    summary = pd.DataFrame([{
+        'n_stable':         int(stable_mask.sum()),
+        'n_input':          len(deg_genes),
+        'frac_stable':      round(float(stable_mask.sum()) / len(deg_genes), 4),
+        'freq_median':      round(float(np.median(freq[stable_mask])), 4),
+        'freq_min':         round(float(freq[stable_mask].min()), 4),
+        'freq_max':         round(float(freq[stable_mask].max()), 4),
+        'n_up_regulated':   n_up,
+        'n_down_regulated': n_down,
+    }])
+    summary.to_csv(OUT_CSV_STATS, index=False)
+    stable_df.to_csv(OUT_CSV_STABLE, index=False)
+    print("\n[stability] podsumowanie:")
+    print(summary.to_string(index=False))
+    print(f"  up (dodatni wspolczynnik):  {n_up}")
+    print(f"  down (ujemny wspolczynnik): {n_down}")
+    print(f"[OK] statystyki -> {OUT_CSV_THR}, {OUT_CSV_STATS}, {OUT_CSV_STABLE}")
 
     # --- KROK 4: incremental top-k ---
     print("\n=== KROK 4: top-k ===")
