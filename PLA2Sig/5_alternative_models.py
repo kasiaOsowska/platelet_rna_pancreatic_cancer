@@ -20,10 +20,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from sklearn.base import clone
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedKFold, GridSearchCV
+from sklearn.model_selection import StratifiedKFold, GridSearchCV, cross_val_score
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import StackingClassifier
 from sklearn.svm import SVC
 from sklearn.metrics import roc_auc_score, roc_curve
 
@@ -43,15 +45,13 @@ from utilz.multi_residual_bootstrap import (
 # ---------------------------------------------------------------------------
 meta_path        = r"../../data/samples_pancreatic.xlsx"
 data_path        = r"../../data/counts_pancreatic.csv"
-GENES_CSV        = "bootstrap_enet_selected_genes.csv"
+GENES_CSV        = "forward_selection_genes.csv"
 
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
 BASE_SEED         = 2137
-LOG2FC_THRESHOLD  = np.log2(1.2)
-DEG_PVAL          = 0.05
 
-GRID_CV_FOLDS     = 10
+GRID_CV_FOLDS     = 30
 N_JOBS            = -1
 
 OUT_PNG_BARS      = "alt_models_test_auc.png"
@@ -81,11 +81,11 @@ def get_model_grids(seed):
                 verbosity=0,
             ),
             'param_grid': {
-                'n_estimators':     [100, 300, 600],
+                'n_estimators':     [50, 100],
                 'max_depth':        [2, 3, 5],
-                'learning_rate':    [0.03, 0.1],
-                'subsample':        [0.8],
-                'colsample_bytree': [0.8],
+                'learning_rate':    [0.03, 0.1, 0.2],
+                'subsample':        [0.5, 0.6, 0.8],
+                'colsample_bytree': [0.5, 0.6, 0.8],
             },
         },
         'svm_rbf': {
@@ -135,6 +135,45 @@ def fit_and_eval(name, spec, X_tr, y_tr, X_te, y_te, cv, seed):
         'train_auc':   float(auc_tr),
         'test_auc':    float(auc_te),
         'proba_te':    proba_te,
+        'estimator':   gs.best_estimator_,
+    }
+
+
+def fit_and_eval_stacking(base_results, X_tr, y_tr, X_te, y_te, cv, seed):
+    """Stacking na 3 nastrojonych modelach bazowych; meta-model: regresja logistyczna."""
+    print(f"\n--- stacking ---")
+    estimators = [(r['model'], clone(r['estimator'])) for r in base_results]
+    stack = StackingClassifier(
+        estimators=estimators,
+        final_estimator=LogisticRegression(
+            max_iter=20000, class_weight='balanced', random_state=seed,
+        ),
+        stack_method='predict_proba',
+        cv=cv, n_jobs=N_JOBS, passthrough=False,
+    )
+
+    auc_cv = float(np.mean(cross_val_score(
+        clone(stack), X_tr, y_tr, scoring='roc_auc', cv=cv, n_jobs=N_JOBS,
+    )))
+    stack.fit(X_tr, y_tr)
+    proba_tr = stack.predict_proba(X_tr)[:, 1]
+    proba_te = stack.predict_proba(X_te)[:, 1]
+    auc_tr   = roc_auc_score(y_tr, proba_tr)
+    auc_te   = roc_auc_score(y_te, proba_te)
+
+    print(f"  base models : {[r['model'] for r in base_results]}")
+    print(f"  CV AUC (train, {GRID_CV_FOLDS}-fold): {auc_cv:.4f}")
+    print(f"  Train AUC (refit on full train)    : {auc_tr:.4f}")
+    print(f"  Holdout test AUC                   : {auc_te:.4f}")
+
+    return {
+        'model':       'stacking',
+        'best_params': {'final_estimator': 'logreg', 'base': [r['model'] for r in base_results]},
+        'cv_auc':      auc_cv,
+        'train_auc':   float(auc_tr),
+        'test_auc':    float(auc_te),
+        'proba_te':    proba_te,
+        'estimator':   stack,
     }
 
 
@@ -207,8 +246,14 @@ def main():
             name, spec, X_tr_z, y_tr_np, X_te_z, y_te_np, cv, BASE_SEED,
         ))
 
+    # === stacking na 3 modelach bazowych ===
+    results.append(fit_and_eval_stacking(
+        results, X_tr_z, y_tr_np, X_te_z, y_te_np, cv, BASE_SEED,
+    ))
+
     # === podsumowanie ===
-    summary = pd.DataFrame([{k: v for k, v in r.items() if k != 'proba_te'}
+    summary = pd.DataFrame([{k: v for k, v in r.items()
+                             if k not in ('proba_te', 'estimator')}
                             for r in results])
     print("\n=== PODSUMOWANIE ===")
     print(summary.to_string(index=False))
