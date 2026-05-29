@@ -1,3 +1,6 @@
+import os
+
+import os
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -133,6 +136,51 @@ def plot_scatter_boxplot(X, y, gene_name):
     plt.show()
 
 
+def plot_panel_boxplots(X, y, gene_map, gene_coef=None, group_order=None, showfliers=False, zscore=True, save_path=None):
+    """Zgrupowany boxplot ekspresji panelu genow (z-score per gen) w rozbiciu
+    na grupy. X to DataFrame probki x geny (kolumny ENSG), y to etykiety grup,
+    gene_map to dict ENSG -> symbol; kolejnosc kluczy wyznacza kolejnosc na osi X."""
+    genes = [g for g in gene_map if g in X.columns]
+    gene_order = [gene_map[g] for g in genes]
+    sub = X[genes].astype(float)
+    if zscore:
+        z = (sub - sub.mean()) / sub.std(ddof=0).replace(0, 1)
+    else:
+        z = sub.copy()
+    z.columns = gene_order
+    z = z.reset_index(drop=True)
+    z['__grupa__'] = np.asarray(y)
+    long = z.melt(id_vars='__grupa__', var_name='gen', value_name='z')
+
+    if group_order is None:
+        present = set(np.asarray(y))
+        group_order = [g for g in [HEALTHY, DISEASE, CANCER] if g in present]
+
+    display_order = gene_order
+    if gene_coef is not None:
+        display_order = sorted(gene_order, key=lambda s: gene_coef.get(s, float('inf')))
+
+    plt.figure(figsize=(max(10, len(genes) * 1.1), 6))
+    ax = sns.boxplot(data=long, x='gen', y='z', hue='__grupa__',
+                     order=display_order, hue_order=group_order,
+                     width=0.7, fliersize=2, showfliers=showfliers)
+    ax.axhline(0, color='gray', linestyle='--', linewidth=1, alpha=0.6)
+    ax.set_xlabel('Gen', fontsize=12)
+    ax.set_ylabel('Ekspresja (z-score)' if zscore else 'Ekspresja', fontsize=12)
+    ax.set_title('Ekspresja panelu biomarkerów w grupach',
+                 fontsize=14, fontweight='bold')
+    ax.legend(title='Grupa', loc='upper right')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(True, alpha=0.3, linestyle='--', axis='y')
+    plt.tight_layout()
+    if save_path:
+        out_dir = os.path.dirname(save_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+
+
 def plot_roc_curve(X, y, title):
     fpr, tpr, thresholds = roc_curve(y, X)
     auc = roc_auc_score(y, X)
@@ -149,7 +197,7 @@ def plot_roc_curve(X, y, title):
     plt.show()
 
 
-def plot_split_balance(splits: dict, save_path: str = None):
+def plot_split_balance(splits: dict):
     """
     splits = {
         'Train': (y_train, sex_train, age_train, stage_train),
@@ -216,9 +264,11 @@ def plot_split_balance(splits: dict, save_path: str = None):
     fig.update_yaxes(title_text="Wiek (lata)", row=1, col=3)
     fig.update_yaxes(title_text="Udział", tickformat=".0%", row=1, col=4)
 
-    if save_path is not None:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        fig.write_image(save_path, scale=2)
+    save_path = "split_balance.png"
+    out_dir = os.path.dirname(save_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    fig.write_image(save_path, scale=2)
 
     fig.show()
 

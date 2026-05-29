@@ -7,6 +7,7 @@ Modele:
   - LogisticRegression z ElasticNet (GridSearch po C, l1_ratio)
   - XGBoost              (GridSearch po n_estimators, max_depth, lr)
   - SVM RBF              (GridSearch po C, gamma)
+  - siec neuronowa (MLP, 2 warstwy ukryte; GridSearch po hidden_layer_sizes, alpha, lr)
 
 Wszystkie hiperparametry tuningowane przez StratifiedKFold na train,
 ostateczna ewaluacja na holdoutowym test secie.
@@ -27,7 +28,8 @@ from sklearn.model_selection import StratifiedKFold, GridSearchCV, cross_val_sco
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import StackingClassifier
 from sklearn.svm import SVC
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, ConfusionMatrixDisplay
 
 from xgboost import XGBClassifier
 
@@ -56,6 +58,8 @@ N_JOBS            = -1
 
 OUT_PNG_BARS      = "alt_models_test_auc.png"
 OUT_PNG_ROC       = "alt_models_roc.png"
+OUT_PNG_CM        = "alt_models_confusion.png"
+OUT_CSV_CM        = "alt_models_confusion.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +67,7 @@ OUT_PNG_ROC       = "alt_models_roc.png"
 # ---------------------------------------------------------------------------
 def get_model_grids(seed):
     return {
+
         'logreg_elasticnet': {
             'estimator': LogisticRegression(
                 penalty='elasticnet', solver='saga',
@@ -81,11 +86,13 @@ def get_model_grids(seed):
                 verbosity=0,
             ),
             'param_grid': {
-                'n_estimators':     [50, 100],
-                'max_depth':        [2, 3, 5],
-                'learning_rate':    [0.03, 0.1, 0.2],
-                'subsample':        [0.5, 0.6, 0.8],
-                'colsample_bytree': [0.5, 0.6, 0.8],
+                'n_estimators':     [200, 400],
+                'max_depth':        [1, 2, 3],
+                'learning_rate':    [0.01, 0.03, 0.1],
+                'min_child_weight': [1, 5, 10],
+                'reg_lambda':       [1.0, 5.0, 10.0],
+                'subsample':        [0.8],
+                'colsample_bytree': [0.8],
             },
         },
         'svm_rbf': {
@@ -96,6 +103,19 @@ def get_model_grids(seed):
             'param_grid': {
                 'C':     [0.1, 1.0, 10.0, 100.0],
                 'gamma': ['scale', 0.001, 0.01, 0.1],
+            },
+        },
+
+        'mlp': {
+            'estimator': MLPClassifier(
+                solver='adam', activation='relu',
+                early_stopping=True, max_iter=2000,
+                random_state=seed,
+            ),
+            'param_grid': {
+                'hidden_layer_sizes': [(32, 16), (32, 16, 8)],
+                'alpha':              [1e-4, 1e-3, 1e-2],
+                'learning_rate_init': [1e-3, 1e-2],
             },
         },
     }
@@ -134,6 +154,7 @@ def fit_and_eval(name, spec, X_tr, y_tr, X_te, y_te, cv, seed):
         'cv_auc':      float(auc_cv),
         'train_auc':   float(auc_tr),
         'test_auc':    float(auc_te),
+        'proba_tr':    proba_tr,
         'proba_te':    proba_te,
         'estimator':   gs.best_estimator_,
     }
@@ -172,9 +193,16 @@ def fit_and_eval_stacking(base_results, X_tr, y_tr, X_te, y_te, cv, seed):
         'cv_auc':      auc_cv,
         'train_auc':   float(auc_tr),
         'test_auc':    float(auc_te),
+        'proba_tr':    proba_tr,
         'proba_te':    proba_te,
         'estimator':   stack,
     }
+
+
+def youden_threshold(y_true, proba):
+    """Prog decyzyjny maksymalizujacy indeks Youdena J = TPR - FPR."""
+    fpr, tpr, thr = roc_curve(y_true, proba)
+    return float(thr[np.argmax(tpr - fpr)])
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +233,14 @@ def main():
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
+
     # === DEG preprocessing (musi byc taki sam jak w skrypcie 4) ===
     print("\n=== DEG preprocessing ===")
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
         ('multi_resid', MultiCovariateResidualBootstrapTransformer(
             covariates=cov, labels=y_train,
-            n_bootstrap=500, fdr_alpha=0.1, min_r2=0.05, cv_threshold_pct=30.0,
+            n_bootstrap=1000, fdr_alpha=0.05, min_r2=0.05, cv_threshold_pct=30.0,
         )),
     ])
     X_tr_deg_df = deg_pipe.fit_transform(X_tr_raw, y_train)
@@ -224,12 +253,10 @@ def main():
             "Czy konfiguracja LOG2FC/DEG_PVAL jest identyczna jak w skrypcie 4?"
         )
 
-    X_tr_sel_df = X_tr_deg_df[selected_genes]
-    X_te_sel_df = X_te_deg_df[selected_genes]
 
-    scaler = StandardScaler().fit(X_tr_sel_df.values)
-    X_tr_z = scaler.transform(X_tr_sel_df.values)
-    X_te_z = scaler.transform(X_te_sel_df.values)
+    scaler = StandardScaler().fit(X_tr_deg_df.values)
+    X_tr_z = scaler.transform(X_tr_deg_df.values)
+    X_te_z = scaler.transform(X_te_deg_df.values)
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
@@ -286,6 +313,38 @@ def main():
     ax.legend(); ax.grid(alpha=0.3)
     plt.tight_layout(); plt.savefig(OUT_PNG_ROC, dpi=140); plt.show()
     print(f"[OK] ROC plot  -> {OUT_PNG_ROC}")
+
+    # === macierze pomylek przy progu Youdena (prog z train, ocena na test) ===
+    print("\n=== MACIERZE POMYLEK (prog Youdena wyznaczony na train) ===")
+    n = len(results)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4))
+    if n == 1:
+        axes = [axes]
+    cm_rows = []
+    for ax, r in zip(axes, results):
+        thr = youden_threshold(y_tr_np, r['proba_tr'])
+        y_pred = (r['proba_te'] >= thr).astype(int)
+        cm = confusion_matrix(y_te_np, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
+        sens = tp / max(tp + fn, 1)
+        spec = tn / max(tn + fp, 1)
+        acc  = (tp + tn) / cm.sum()
+        cm_rows.append({
+            'model': r['model'], 'prog_youden': round(thr, 4),
+            'TN': int(tn), 'FP': int(fp), 'FN': int(fn), 'TP': int(tp),
+            'czulosc': round(float(sens), 4),
+            'swoistosc': round(float(spec), 4),
+            'dokladnosc': round(float(acc), 4),
+        })
+        print(f"  {r['model']:<20} prog={thr:.4f}  TN={tn} FP={fp} FN={fn} TP={tp}  "
+              f"czulosc={sens:.3f} swoistosc={spec:.3f} dokladnosc={acc:.3f}")
+        ConfusionMatrixDisplay(cm, display_labels=['kontrola', 'nowotwor']).plot(
+            ax=ax, colorbar=False, cmap='Blues')
+        ax.set_title(f"{r['model']}\nprog={thr:.2f}")
+    plt.tight_layout(); plt.savefig(OUT_PNG_CM, dpi=140); plt.show()
+    pd.DataFrame(cm_rows).to_csv(OUT_CSV_CM, index=False)
+    print(f"[OK] confusion matrices -> {OUT_PNG_CM}")
+    print(f"[OK] confusion summary  -> {OUT_CSV_CM}")
 
 
 if __name__ == '__main__':
