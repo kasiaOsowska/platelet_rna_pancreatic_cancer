@@ -5,6 +5,7 @@ DEG (log2FC + Mann-Whitney) -> LASSO 100-fold CV (lambda.1se)
 """
 
 import warnings;
+from pathlib import Path
 
 from utilz.multi_residual_bootstrap import MultiCovariateResidualBootstrapTransformer, build_covariates
 
@@ -13,6 +14,9 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+OUT_DIR = Path(__file__).stem
+Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
@@ -120,22 +124,10 @@ def main():
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
     print("\n=== KROK 1: DEG ===")
-    """
-            ('multi_resid', MultiCovariateResidualBootstrapTransformer(
-        covariates=cov, labels=y_train,
-        n_bootstrap=500, fdr_alpha=0.1, min_r2=0.05, cv_threshold_pct=30.0,
-        )),
-    """
-    cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
         ('const',  ConstantExpressionReductor()),
         ('log2fc', Log2FCReductor(min_abs_log2fc=LOG2FC_THRESHOLD)),
         ('pval',   MannWhitneyReductor(alpha=DEG_PVAL)),
-        ('multi_resid', MultiCovariateResidualBootstrapTransformer(
-            covariates=cov, labels=y_train,
-            n_bootstrap=1000, fdr_alpha=0.1, min_r2=0.05, cv_threshold_pct=30.0,
-        )),
-
     ])
     X_tr_deg_df = deg_pipe.fit_transform(X_tr_raw, y_train)
     X_te_deg_df = deg_pipe.transform(X_te_raw)
@@ -197,7 +189,7 @@ def main():
     print(f"Train AUC:  {auc_tr:.4f}")
     print(f"Holdout AUC:{auc_te:.4f}")
 
-    out_path = "pla2sig_selected_genes.csv"
+    out_path = f"{OUT_DIR}/pla2sig_selected_genes.csv"
     glm_coefs = glm.coef_.ravel()
     out_df = (pd.DataFrame({
         'gene':      selected_genes,

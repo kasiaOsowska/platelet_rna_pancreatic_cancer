@@ -17,11 +17,15 @@ warnings.filterwarnings('ignore')
 
 import os
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from pathlib import Path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "")))
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+OUT_DIR = Path(__file__).stem
+Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -31,8 +35,8 @@ from sklearn.metrics import roc_auc_score
 from utilz.Dataset import load_dataset
 from utilz.constans import DISEASE, HEALTHY
 
-meta_path = r"../../data/samples_pancreatic.xlsx"
-data_path = r"../../data/counts_pancreatic.csv"
+meta_path = r"../data/samples_pancreatic.xlsx"
+data_path = r"../data/counts_pancreatic.csv"
 
 # split (musi byc taki sam jak w bootstrap_enet.py, zeby trafic w ten sam train)
 TEST_SIZE  = 0.2
@@ -40,12 +44,12 @@ VALID_SIZE = 0.2
 BASE_SEED  = 2137
 
 # forward selection
-STABLE_GENES_CSV = "stability_all_stable_genes.csv"
+STABLE_GENES_CSV = "3_stable_enet_selection/stability_all_stable_genes.csv"
 TOP_K_FINAL      = 12      # ile genow dobrac
 SELECT_CV_FOLDS  = 10      # foldy do oceny kandydata (capowane min. liczebnoscia klasy)
 
-OUT_CSV_PATH = "forward_selection_genes.csv"
-OUT_PNG_PATH = "forward_selection_auc.png"
+OUT_CSV_PATH = f"{OUT_DIR}/forward_selection_genes.csv"
+OUT_PNG_PATH = f"{OUT_DIR}/forward_selection_auc.png"
 
 
 def cv_auc_train(X, y, idx, n_folds, seed=BASE_SEED):

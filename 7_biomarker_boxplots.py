@@ -7,12 +7,19 @@ Etykiety pozostaja oryginalne (3 grupy), bez scalania.
 import warnings
 warnings.filterwarnings('ignore')
 
+from pathlib import Path
+
 from utilz.Dataset import load_dataset
 from utilz.constans import BIOMARKER_PANEL
 from utilz.helpers import plot_panel_boxplots
 
-meta_path = r"../../data/samples_pancreatic.xlsx"
-data_path = r"../../data/counts_pancreatic.csv"
+OUT_DIR = Path(__file__).stem
+Path(OUT_DIR).mkdir(exist_ok=True)
+
+meta_path = r"../data/samples_pancreatic.xlsx"
+data_path = r"../data/counts_pancreatic.csv"
+
+OUT_PNG_BOX = f"{OUT_DIR}/biomarker_panel_box.png"
 
 # wspolczynniki mean_signed_coef z selekcji stabilnosci
 # (ujemny = obnizony, dodatni = podwyzszony w nowotworze); sluza do uszeregowania osi X
@@ -38,7 +45,7 @@ def main():
         ds.X, ds.y.values, BIOMARKER_PANEL,
         gene_coef=PANEL_COEF,
         zscore=False,
-        save_path="biomarker_panel_box.png",
+        save_path=OUT_PNG_BOX,
     )
 
 

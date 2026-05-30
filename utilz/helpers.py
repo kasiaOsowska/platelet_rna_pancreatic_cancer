@@ -274,7 +274,9 @@ def plot_split_balance(splits: dict):
 
 
 
-def plot_group_overview(splits: dict, colors: dict = None, title: str = None):
+def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
+                        save_path: str = None, white_bg: bool = True,
+                        show: bool = True):
 
     names = list(splits.keys())
 
@@ -283,7 +285,7 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None):
         colors = {s: _palette[i % len(_palette)] for i, s in enumerate(names)}
 
     if title is None:
-        title = " / ".join(names) + " – group overview"
+        title = " / ".join(names) + " – przegląd grup"
     all_sex = pd.concat([splits[s][1] for s in names])
     sex_vals   = sorted(all_sex.unique())
 
@@ -293,7 +295,7 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None):
 
     fig = make_subplots(
         rows=1, cols=2,
-        subplot_titles=["Sex distribution", "Age distribution"],
+        subplot_titles=["Rozkład płci", "Rozkład wieku"],
         horizontal_spacing=0.10,
     )
 
@@ -321,12 +323,51 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None):
             showlegend=False,
         ), row=1, col=2)
 
-    fig.update_layout(
+    layout_kwargs = dict(
         barmode='group',
         title={"text": title},
         legend=dict(orientation='h', yanchor='bottom', y=1.08, xanchor='center', x=0.5),
     )
-    fig.update_yaxes(title_text="Proportion",  tickformat=".0%", row=1, col=1)
-    fig.update_yaxes(title_text="Age (years)", row=1, col=2)
+    if white_bg:
+        layout_kwargs.update(
+            paper_bgcolor='white', plot_bgcolor='white',
+            font=dict(color='black'),     # caly tekst (osie, tytul, legenda, etykiety)
+            title_font=dict(color='black'),
+        )
 
-    fig.show()
+    fig.update_layout(**layout_kwargs)
+    fig.update_yaxes(title_text="Udział",      tickformat=".0%", row=1, col=1)
+    fig.update_yaxes(title_text="Wiek (lata)", row=1, col=2)
+    if white_bg:
+        axis_style = dict(
+            showline=True, linecolor='black', linewidth=1,
+            tickcolor='black', tickfont=dict(color='black'),
+            title_font=dict(color='black'),
+            gridcolor='lightgray',
+            zerolinecolor='lightgray',
+        )
+        fig.update_xaxes(**axis_style)
+        fig.update_yaxes(**axis_style)
+        # podtytuly subplot ("Sex distribution" / "Age distribution") - czarne
+        for ann in fig.layout.annotations:
+            ann.font = dict(color='black', size=ann.font.size or 14)
+        # etykiety "n=X (Y%)" nad slupkami w panelu Sex
+        for tr in fig.data:
+            if isinstance(tr, go.Bar):
+                tr.textfont = dict(color='black')
+
+    if save_path is not None:
+        from pathlib import Path
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        suffix = save_path.suffix.lower()
+        if suffix == '.html':
+            fig.write_html(str(save_path))
+        else:
+            # PNG/PDF/SVG/JPEG przez kaleido; scale=2 -> wieksza rozdzielczosc
+            fig.write_image(str(save_path), scale=2)
+        print(f"[OK] zapisano: {save_path.resolve()}")
+
+    if show:
+        fig.show()
+    return fig

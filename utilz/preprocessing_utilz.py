@@ -5,8 +5,6 @@ from statsmodels.stats.multitest import multipletests
 from sklearn.feature_selection import f_classif
 from scipy import stats
 
-from utilz.residual_bootstrap import _ResidualBootstrapBase
-
 
 class AnovaFdrReductor(BaseEstimator, TransformerMixin):
     def __init__(self, alpha=0.001):
@@ -168,21 +166,3 @@ class WithinGroupVarianceReductor(BaseEstimator, TransformerMixin):
 
     def get_feature_names_out(self, input_features=None):
         return np.asarray(self.selected_genes_, dtype=object)
-
-
-class AgeResidualBootstrapTransformer(_ResidualBootstrapBase):
-    def __init__(self, age: pd.Series, labels: pd.Series = None, **kwargs):
-        super().__init__(covariate=age, labels=labels, **kwargs)
-        self.age = age
-
-
-class SexResidualBootstrapTransformer(_ResidualBootstrapBase):
-    def __init__(self, sex: pd.Series, labels: pd.Series = None, **kwargs):
-        super().__init__(covariate=sex, labels=labels, **kwargs)
-        self.sex = sex
-
-    def _prepare_covariate(self, index):
-        cov = pd.Series(self.covariate).reindex(index)
-        if not pd.api.types.is_numeric_dtype(cov):
-            cov = cov.map({"F": 0, "M": 1})
-        return cov.astype(float)

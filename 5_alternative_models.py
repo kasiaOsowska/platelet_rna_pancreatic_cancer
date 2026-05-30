@@ -17,9 +17,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+OUT_DIR = Path(__file__).stem
+Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.base import clone
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -45,9 +49,9 @@ from utilz.multi_residual_bootstrap import (
 # ---------------------------------------------------------------------------
 # Konfiguracja - musi byc zgodna z 4_pla2sig_gene_selection.py
 # ---------------------------------------------------------------------------
-meta_path        = r"../../data/samples_pancreatic.xlsx"
-data_path        = r"../../data/counts_pancreatic.csv"
-GENES_CSV        = "forward_selection_genes.csv"
+meta_path        = r"../data/samples_pancreatic.xlsx"
+data_path        = r"../data/counts_pancreatic.csv"
+GENES_CSV        = "4_forward_selection/forward_selection_genes.csv"
 
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
@@ -56,10 +60,10 @@ BASE_SEED         = 2137
 GRID_CV_FOLDS     = 30
 N_JOBS            = -1
 
-OUT_PNG_BARS      = "alt_models_test_auc.png"
-OUT_PNG_ROC       = "alt_models_roc.png"
-OUT_PNG_CM        = "alt_models_confusion.png"
-OUT_CSV_CM        = "alt_models_confusion.csv"
+OUT_PNG_BARS      = f"{OUT_DIR}/alt_models_test_auc.png"
+OUT_PNG_ROC       = f"{OUT_DIR}/alt_models_roc.png"
+OUT_PNG_CM        = f"{OUT_DIR}/alt_models_confusion.png"
+OUT_CSV_CM        = f"{OUT_DIR}/alt_models_confusion.csv"
 
 
 # ---------------------------------------------------------------------------

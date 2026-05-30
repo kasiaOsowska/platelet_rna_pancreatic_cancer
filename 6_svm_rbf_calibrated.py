@@ -10,9 +10,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+OUT_DIR = Path(__file__).stem
+Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
@@ -30,9 +34,12 @@ from utilz.multi_residual_bootstrap import (
 # ---------------------------------------------------------------------------
 # Konfiguracja - zgodna z 5_alternative_models.py
 # ---------------------------------------------------------------------------
-meta_path = r"../../data/samples_pancreatic.xlsx"
-data_path = r"../../data/counts_pancreatic.csv"
-GENES_CSV = "forward_selection_genes.csv"
+meta_path = r"../data/samples_pancreatic.xlsx"
+data_path = r"../data/counts_pancreatic.csv"
+GENES_CSV = "4_forward_selection/forward_selection_genes.csv"
+
+OUT_PNG_CALIB    = f"{OUT_DIR}/svm_calibration.png"
+OUT_PNG_CM_3x2   = f"{OUT_DIR}/svm_confusion_3x2.png"
 
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
@@ -198,7 +205,7 @@ def main():
     lo, hi = float(dec_tr.min()), float(dec_tr.max())
     proba_before = np.clip(
         (raw_svm.decision_function(X_te_z) - lo) / (hi - lo), 0.0, 1.0)
-    plot_calibration(y_te_np, proba_before, proba_te)
+    plot_calibration(y_te_np, proba_before, proba_te, out_png=OUT_PNG_CALIB)
 
     # === prog decyzyjny z indeksu Youdena (wyznaczony na train) ===
     thr = youden_threshold(y_tr_np, proba_tr)
@@ -215,7 +222,7 @@ def main():
     show_report(y_pred, y_test, ds, le)
 
     # === niekwadratowa macierz pomylek: 3 klasy prawdziwe x 2 przewidziane ===
-    confusion_3x2(y_pred, y_test.index, ds, le)
+    confusion_3x2(y_pred, y_test.index, ds, le, out_png=OUT_PNG_CM_3x2)
 
 
 if __name__ == '__main__':

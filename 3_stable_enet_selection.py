@@ -12,6 +12,7 @@ Schemat (wzorowany na 4_pla2sig_gene_selection.py):
 """
 
 import warnings
+from pathlib import Path
 
 from utilz.multi_residual_bootstrap import (
     MultiCovariateResidualBootstrapTransformer, build_covariates,
@@ -22,6 +23,9 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+OUT_DIR = Path(__file__).stem
+Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
@@ -37,8 +41,8 @@ from utilz.preprocessing_utilz import (
     MeanExpressionReductor,
 )
 
-meta_path = r"../../data/samples_pancreatic.xlsx"
-data_path = r"../../data/counts_pancreatic.csv"
+meta_path = r"../data/samples_pancreatic.xlsx"
+data_path = r"../data/counts_pancreatic.csv"
 
 # split / DEG
 TEST_SIZE  = 0.2
@@ -66,11 +70,11 @@ INCR_CV_FOLDS       = 50
 
 N_JOBS              = -1
 
-OUT_CSV_GENES       = "bootstrap_enet_selected_genes.csv"
-OUT_PNG_INCR        = "stability_enet_incremental.png"
-OUT_CSV_THR         = "stability_threshold_counts.csv"
-OUT_CSV_STATS       = "stability_summary.csv"
-OUT_CSV_STABLE      = "stability_all_stable_genes.csv"
+OUT_CSV_GENES       = f"{OUT_DIR}/bootstrap_enet_selected_genes.csv"
+OUT_PNG_INCR        = f"{OUT_DIR}/stability_enet_incremental.png"
+OUT_CSV_THR         = f"{OUT_DIR}/stability_threshold_counts.csv"
+OUT_CSV_STATS       = f"{OUT_DIR}/stability_summary.csv"
+OUT_CSV_STABLE      = f"{OUT_DIR}/stability_all_stable_genes.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +214,7 @@ def main():
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
         ('ConstantExpressionReductor', ConstantExpressionReductor()),
-
         ('AnovaFDRReductor', AnovaFdrReductor(alpha=ANOVA_FDR_THRESHOLD)),
-        #('Log2FCReductor', Log2FCReductor(min_abs_log2fc=LOG2FC_THRESHOLD)),
         ('MeanExpressionReductor', MeanExpressionReductor(MEAN_THRESHOLD)),
         ('multi_resid', MultiCovariateResidualBootstrapTransformer(
             covariates=cov, labels=y_train,
@@ -257,9 +259,6 @@ def main():
           f"przeszlo prog freq >= {STABILITY_THRESHOLD:.0%}")
     print(stable_df.head(20).to_string())
 
-    if stable_mask.sum() == 0:
-        print("\n[!] zaden gen nie przeszedl progu stability -- konczy.")
-        return
 
     # --- statystyki stabilnosci (zapis do CSV) ---
     thresholds = [0.5, 0.7, 0.8, 0.9, 1.0]
