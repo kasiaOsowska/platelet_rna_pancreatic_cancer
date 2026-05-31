@@ -9,8 +9,8 @@ Modele:
   - SVM RBF              (GridSearch po C, gamma)
   - siec neuronowa (MLP, 2 warstwy ukryte; GridSearch po hidden_layer_sizes, alpha, lr)
 
-Wszystkie hiperparametry tuningowane przez StratifiedKFold na train,
-ostateczna ewaluacja na holdoutowym test secie.
+Wszystkie hiperparametry tuningowane przez wielokryterialne stratyfikowane
+foldy z ds.get_stratified_kfold na train, ostateczna ewaluacja na holdoutowym test secie.
 """
 
 import warnings
@@ -28,7 +28,7 @@ Path(OUT_DIR).mkdir(exist_ok=True)
 from sklearn.base import clone
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedKFold, GridSearchCV, cross_val_score
+from sklearn.model_selection import GridSearchCV, cross_val_score, StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import StackingClassifier
 from sklearn.svm import SVC
@@ -80,7 +80,7 @@ def get_model_grids(seed):
             ),
             'param_grid': {
                 'C':        [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0],
-                'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9],
+                'l1_ratio': [0, 0.1, 0.3, 0.5, 0.7, 0.9],
             },
         },
         'xgboost': {
@@ -90,13 +90,13 @@ def get_model_grids(seed):
                 verbosity=0,
             ),
             'param_grid': {
-                'n_estimators':     [200, 400],
-                'max_depth':        [1, 2, 3],
-                'learning_rate':    [0.01, 0.03, 0.1],
-                'min_child_weight': [1, 5, 10],
-                'reg_lambda':       [1.0, 5.0, 10.0],
-                'subsample':        [0.8],
-                'colsample_bytree': [0.8],
+                'n_estimators':     [50, 100, 200, 400],
+                'max_depth':        [1, 2, 3, 6],
+                'learning_rate':    [0.01, 0.03, 0.1, 0.2, 0.3],
+                'min_child_weight': [1, 5, 10, 20, 50],
+                'reg_lambda':       [0.5, 1.0, 2.0],
+                'subsample':        [0.8, 1.0],
+                'colsample_bytree': [0.8, 1.0],
             },
         },
         'svm_rbf': {
@@ -105,21 +105,8 @@ def get_model_grids(seed):
                 random_state=seed,
             ),
             'param_grid': {
-                'C':     [0.1, 1.0, 10.0, 100.0],
+                'C':     [0.1, 1.0, 10.0, 100.0, 200],
                 'gamma': ['scale', 0.001, 0.01, 0.1],
-            },
-        },
-
-        'mlp': {
-            'estimator': MLPClassifier(
-                solver='adam', activation='relu',
-                early_stopping=True, max_iter=2000,
-                random_state=seed,
-            ),
-            'param_grid': {
-                'hidden_layer_sizes': [(32, 16), (32, 16, 8)],
-                'alpha':              [1e-4, 1e-3, 1e-2],
-                'learning_rate_init': [1e-3, 1e-2],
             },
         },
     }
@@ -127,12 +114,12 @@ def get_model_grids(seed):
 
 def fit_and_eval(name, spec, X_tr, y_tr, X_te, y_te, cv, seed):
     print(f"\n--- {name} ---")
-    sample_weight = None
     fit_params = {}
     if name == 'xgboost':
-        # XGB nie ma class_weight='balanced'; recznie nadajemy wagi probek
-        pos = (y_tr == 1).sum()
-        neg = (y_tr == 0).sum()
+        # XGB nie ma class_weight='balanced'; ustawiamy scale_pos_weight
+        # na stosunek liczby probek klasy ujemnej do liczby probek klasy dodatniej
+        pos = int((y_tr == 1).sum())
+        neg = int((y_tr == 0).sum())
         spec['estimator'].set_params(scale_pos_weight=neg / max(pos, 1))
 
     gs = GridSearchCV(
@@ -225,6 +212,13 @@ def main():
     # === dane + split (taki sam jak w skrypcie 4) ===
     ds = load_dataset(data_path, meta_path, label_col="Group")
     ds.y = ds.y.replace({DISEASE: HEALTHY})
+
+    """
+    drop_idx = ds.y.index[ds.y == DISEASE]
+    ds.X = ds.X.drop(index=drop_idx)
+    ds.meta = ds.meta.drop(index=drop_idx)
+    ds.y = ds.y.drop(index=drop_idx)
+    """
     y_enc = pd.Series(LabelEncoder().fit_transform(ds.y), index=ds.y.index)
 
     X_tr_raw, X_te_raw, X_va_raw, y_train, y_test, y_valid = ds.get_train_test_valid_split(
@@ -234,29 +228,30 @@ def main():
     # walidacyjny niepotrzebny -> doklejamy do test setu (split deterministyczny)
     X_te_raw = pd.concat([X_te_raw, X_va_raw])
     y_test   = pd.concat([y_test, y_valid])
+
+    # restrykcja do panelu 12 genow PRZED pipeline'em - modele uczone tylko na nich
+    missing = [g for g in selected_genes if g not in X_tr_raw.columns]
+    if missing:
+        raise ValueError(f"Geny z CSV nie sa dostepne w danych: {missing[:5]}...")
+    X_tr_raw = X_tr_raw[selected_genes]
+    X_te_raw = X_te_raw[selected_genes]
+
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
 
-    # === DEG preprocessing (musi byc taki sam jak w skrypcie 4) ===
-    print("\n=== DEG preprocessing ===")
+    # === korekcja zmiennych zaklocajacych na panelu 12 genow ===
+    # parametry rozluznione, zeby skorygowac wszystkie 12 genow, a nie podzbior
+    print("\n=== korekcja na 12 genach panelu ===")
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
         ('multi_resid', MultiCovariateResidualBootstrapTransformer(
             covariates=cov, labels=y_train,
-            n_bootstrap=1000, fdr_alpha=0.05, min_r2=0.05, cv_threshold_pct=30.0,
+            n_bootstrap=2, fdr_alpha=1, min_r2=0, cv_threshold_pct=1e9,
         )),
     ])
     X_tr_deg_df = deg_pipe.fit_transform(X_tr_raw, y_train)
     X_te_deg_df = deg_pipe.transform(X_te_raw)
-
-    missing = [g for g in selected_genes if g not in X_tr_deg_df.columns]
-    if missing:
-        raise ValueError(
-            f"Geny z CSV nie przeszly DEG-preprocessingu: {missing[:5]}... "
-            "Czy konfiguracja LOG2FC/DEG_PVAL jest identyczna jak w skrypcie 4?"
-        )
-
 
     scaler = StandardScaler().fit(X_tr_deg_df.values)
     X_tr_z = scaler.transform(X_tr_deg_df.values)
@@ -265,7 +260,13 @@ def main():
     y_te_np = y_test.values
 
     # === fit modeli ===
-    cv = StratifiedKFold(
+    # foldy z wlasnej, wielokryterialnej stratyfikacji (ds.get_stratified_kfold)
+    cv = ds.get_stratified_kfold(X_tr_raw, y_train, n_splits=GRID_CV_FOLDS, random_state=BASE_SEED)
+    # stacking uzywa wewnetrznie cross_val_predict, ktory wymaga partycji
+    # (kazda probka w dokladnie jednym foldzie testowym); ds.get_stratified_kfold
+    # dokleja remainder do treningu w kazdym foldzie, wiec dla stackingu fallback
+    # do sklearnowego StratifiedKFold
+    cv_stack = StratifiedKFold(
         n_splits=min(GRID_CV_FOLDS, int(np.bincount(y_tr_np).min())),
         shuffle=True, random_state=BASE_SEED,
     )
@@ -279,7 +280,7 @@ def main():
 
     # === stacking na 3 modelach bazowych ===
     results.append(fit_and_eval_stacking(
-        results, X_tr_z, y_tr_np, X_te_z, y_te_np, cv, BASE_SEED,
+        results, X_tr_z, y_tr_np, X_te_z, y_te_np, cv_stack, BASE_SEED,
     ))
 
     # === podsumowanie ===

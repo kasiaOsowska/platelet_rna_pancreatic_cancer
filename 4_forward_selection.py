@@ -29,7 +29,6 @@ Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 
 from utilz.Dataset import load_dataset
@@ -52,13 +51,12 @@ OUT_CSV_PATH = f"{OUT_DIR}/forward_selection_genes.csv"
 OUT_PNG_PATH = f"{OUT_DIR}/forward_selection_auc.png"
 
 
-def cv_auc_train(X, y, idx, n_folds, seed=BASE_SEED):
-    """Sredni CV AUC na zbiorze treningowym dla kolumn `idx`."""
-    n_folds = min(n_folds, int(np.bincount(y.astype(int)).min()))
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+def cv_auc_train(X, y, idx, folds, seed=BASE_SEED):
+    """Sredni CV AUC na zbiorze treningowym dla kolumn `idx`.
+    `folds` to lista par (train_idx, test_idx) z ds.get_stratified_kfold."""
     aucs = []
     Xi = X[:, idx]
-    for tr, va in skf.split(Xi, y):
+    for tr, va in folds:
         mdl = LogisticRegression(
             max_iter=20000, class_weight='balanced', random_state=seed,
         ).fit(Xi[tr], y[tr])
@@ -75,7 +73,7 @@ def test_auc(X_tr, y_tr, X_te, y_te, idx, seed=BASE_SEED):
 
 
 def forward_select(X_tr, y_tr, candidate_idx, gene_names, k_max,
-                   n_folds=SELECT_CV_FOLDS, seed=BASE_SEED,
+                   folds, seed=BASE_SEED,
                    X_te=None, y_te=None):
     """Chciwy dobor: na kazdym kroku dokladamy gen maks. CV AUC na train."""
     selected = []
@@ -87,7 +85,7 @@ def forward_select(X_tr, y_tr, candidate_idx, gene_names, k_max,
         best_col, best_auc, best_std = None, -np.inf, np.nan
         for col in remaining:
             trial = selected + [col]
-            auc_mean, auc_std = cv_auc_train(X_tr, y_tr, trial, n_folds, seed)
+            auc_mean, auc_std = cv_auc_train(X_tr, y_tr, trial, folds, seed)
             if auc_mean > best_auc:
                 best_col, best_auc, best_std = col, auc_mean, auc_std
 
@@ -147,9 +145,11 @@ def main():
     # --- greedy forward selection ---
     print(f"\n=== forward selection (CV AUC na train, {SELECT_CV_FOLDS}-fold) ===")
     candidate_idx = list(range(len(genes)))
+    # foldy z wlasnej, wielokryterialnej stratyfikacji (ds.get_stratified_kfold), liczone raz
+    folds = ds.get_stratified_kfold(X_tr_df, y_train, n_splits=SELECT_CV_FOLDS, random_state=BASE_SEED)
     selected_idx, fs_df = forward_select(
         X_tr_z, y_tr_np, candidate_idx, genes, k_max=TOP_K_FINAL,
-        n_folds=SELECT_CV_FOLDS, seed=BASE_SEED,
+        folds=folds, seed=BASE_SEED,
         X_te=X_te_z, y_te=y_te_np,
     )
     selected_genes = [genes[i] for i in selected_idx]

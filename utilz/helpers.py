@@ -274,7 +274,25 @@ def plot_split_balance(splits: dict):
 
 
 
+def _to_rgba(color: str, alpha: float = 0.7) -> str:
+    """Hex/rgb -> 'rgba(r,g,b,a)'. Nazwy kolorow zwracane bez zmian."""
+    c = color.strip()
+    if c.startswith('#'):
+        c = c.lstrip('#')
+        if len(c) == 3:
+            r, g, b = (int(ch * 2, 16) for ch in c)
+        else:
+            r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        return f'rgba({r},{g},{b},{alpha})'
+    if c.startswith('rgb('):
+        body = c[c.index('(') + 1: c.rindex(')')]
+        return f'rgba({body},{alpha})'
+    return c
+
+
 def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
+                        libsize_data: dict = None,
+                        width: int = None, height: int = 420,
                         save_path: str = None, white_bg: bool = True,
                         show: bool = True):
 
@@ -284,8 +302,6 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
         _palette = pc.qualitative.Plotly
         colors = {s: _palette[i % len(_palette)] for i, s in enumerate(names)}
 
-    if title is None:
-        title = " / ".join(names) + " – przegląd grup"
     all_sex = pd.concat([splits[s][1] for s in names])
     sex_vals   = sorted(all_sex.unique())
 
@@ -293,15 +309,22 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
     sex_raw      = {s: splits[s][1].value_counts()               for s in names}
     age_data     = {s: splits[s][2].values                       for s in names}
 
+    has_libsize = libsize_data is not None
+    n_cols = 3 if has_libsize else 2
+    subplot_titles = ["Rozkład płci", "Rozkład wieku"]
+    if has_libsize:
+        subplot_titles.append("Głębokość sekwencjonowania")
+
     fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["Rozkład płci", "Rozkład wieku"],
+        rows=1, cols=n_cols,
+        subplot_titles=subplot_titles,
         horizontal_spacing=0.10,
     )
 
     for s in names:
         color = colors[s]
-        # --- Sex distribution: % na osi Y + "n=X (Y%)" na słupku ---
+        color_a = _to_rgba(color, 0.7)
+        # --- Sex distribution: % na osi Y + "n=X (Y%)" na słupku, jedyny trace z legenda ---
         y_sex_pct = [sex_counts[s].get(sv, 0) for sv in sex_vals]
         y_sex_cnt = [sex_raw[s].get(sv, 0)    for sv in sex_vals]
         labels    = [f"n={cnt}<br>({pct:.0%})"
@@ -311,23 +334,47 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
             y=y_sex_pct,
             text=labels,
             textposition='outside',
-            marker_color=color,
-            showlegend=False,
+            marker_color=color_a,
+            legendgroup=s,
+            showlegend=True,
         ), row=1, col=1)
 
         # --- Age distribution: boxplot ---
         fig.add_trace(go.Box(
             name=s, y=age_data[s],
+            line=dict(color=color),
+            fillcolor=color_a,
             marker_color=color,
             boxmean=True,
+            legendgroup=s,
             showlegend=False,
         ), row=1, col=2)
 
+        # --- Libsize boxplot (jesli dane podane) ---
+        if has_libsize and s in libsize_data:
+            fig.add_trace(go.Box(
+                name=s, y=libsize_data[s],
+                line=dict(color=color),
+                fillcolor=color_a,
+                marker_color=color,
+                boxmean=True,
+                legendgroup=s,
+                showlegend=False,
+            ), row=1, col=3)
+
+    if width is None:
+        width = 1100 if has_libsize else 850
     layout_kwargs = dict(
         barmode='group',
-        title={"text": title},
-        legend=dict(orientation='h', yanchor='bottom', y=1.08, xanchor='center', x=0.5),
+        legend=dict(orientation='h', yanchor='bottom', y=1.10,
+                    xanchor='center', x=0.5,
+                    font=dict(size=13)),
+        margin=dict(t=70, l=55, r=20, b=50),
+        width=width,
+        height=height,
     )
+    if title is not None:
+        layout_kwargs['title'] = {"text": title}
     if white_bg:
         layout_kwargs.update(
             paper_bgcolor='white', plot_bgcolor='white',
@@ -336,8 +383,10 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
         )
 
     fig.update_layout(**layout_kwargs)
-    fig.update_yaxes(title_text="Udział",      tickformat=".0%", row=1, col=1)
-    fig.update_yaxes(title_text="Wiek (lata)", row=1, col=2)
+    fig.update_yaxes(title_text="Udział",      tickformat=".0%", title_standoff=4, row=1, col=1)
+    fig.update_yaxes(title_text="Wiek (lata)", title_standoff=4, row=1, col=2)
+    if has_libsize:
+        fig.update_yaxes(title_text="log10(Lib.size)", title_standoff=4, row=1, col=3)
     if white_bg:
         axis_style = dict(
             showline=True, linecolor='black', linewidth=1,

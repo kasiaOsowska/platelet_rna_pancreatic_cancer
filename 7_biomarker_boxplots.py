@@ -35,7 +35,6 @@ PANEL_COEF = {
     'DENND6B':  0.134,
     'DDX11L17':-0.130,
     'H2BC15':  -0.092,
-    # 'BTN3A2': ...,  # do uzupelnienia, na razie trafia na koniec osi
 }
 
 

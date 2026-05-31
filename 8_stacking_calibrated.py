@@ -1,8 +1,11 @@
 """
-Samodzielny skrypt: SVM RBF na panelu genow PLA2Sig, skalibrowany
-(CalibratedClassifierCV) tak, aby zwracal prawdopodobienstwa przynaleznosci
-do klasy. Uzywa tego samego splitu, DEG-preprocessingu i panelu genow co
-5_alternative_models.py. Raport klasyfikacji przez show_report, krzywa
+Samodzielny skrypt: model stacking (LogReg ElasticNet + XGBoost + SVM RBF
+jako bazowe; LogReg jako meta-model) na panelu genow PLA2Sig, skalibrowany
+(CalibratedClassifierCV) tak, aby zwracal sensowne prawdopodobienstwa
+przynaleznosci do klasy. Uzywa tego samego splitu, DEG-preprocessingu i
+panelu genow co 5_alternative_models.py. Bazowe modele tuningowane przez
+GridSearchCV (jak w skrypcie 5), nastepnie stacking owijany w
+CalibratedClassifierCV. Raport klasyfikacji przez show_report, krzywa
 niezawodnosci przed i po kalibracji oraz niekwadratowa macierz pomylek.
 """
 
@@ -18,11 +21,20 @@ import matplotlib.pyplot as plt
 OUT_DIR = Path(__file__).stem
 Path(OUT_DIR).mkdir(exist_ok=True)
 
+from sklearn.base import clone
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import StackingClassifier
 from sklearn.svm import SVC
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.metrics import roc_auc_score, roc_curve, classification_report, confusion_matrix, brier_score_loss
+from sklearn.metrics import (
+    roc_auc_score, roc_curve, classification_report,
+    confusion_matrix, brier_score_loss,
+)
+
+from xgboost import XGBClassifier
 
 from utilz.Dataset import load_dataset
 from utilz.constans import DISEASE, HEALTHY, CANCER
@@ -32,30 +44,86 @@ from utilz.multi_residual_bootstrap import (
 )
 
 # ---------------------------------------------------------------------------
-# Konfiguracja - zgodna z 5_alternative_models.py
+# Konfiguracja - zgodna z 5_alternative_models.py / 6_svm_rbf_calibrated.py
 # ---------------------------------------------------------------------------
 meta_path = r"../data/samples_pancreatic.xlsx"
 data_path = r"../data/counts_pancreatic.csv"
 GENES_CSV = "4_forward_selection/forward_selection_genes.csv"
 
-OUT_PNG_CALIB    = f"{OUT_DIR}/svm_calibration.png"
-OUT_PNG_CM_3x2   = f"{OUT_DIR}/svm_confusion_3x2.png"
+OUT_PNG_CALIB  = f"{OUT_DIR}/stacking_calibration.png"
+OUT_PNG_CM_3x2 = f"{OUT_DIR}/stacking_confusion_3x2.png"
 
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
 BASE_SEED  = 2137
 
-SVM_C        = 1.0
-SVM_GAMMA    = 0.01
+GRID_CV_FOLDS = 30
+N_JOBS        = -1
+
 CALIB_METHOD = 'sigmoid'
 CALIB_CV     = 10
 
 
-def make_svm():
-    return SVC(
-        kernel='rbf', C=SVM_C, gamma=SVM_GAMMA,
-        class_weight='balanced', random_state=BASE_SEED,
-    )
+# ---------------------------------------------------------------------------
+# Bazowe modele + siatki (te same co w 5_alternative_models.py)
+# ---------------------------------------------------------------------------
+def get_model_grids(seed):
+    return {
+        'logreg_elasticnet': {
+            'estimator': LogisticRegression(
+                penalty='elasticnet', solver='saga',
+                max_iter=20000, class_weight='balanced',
+                random_state=seed,
+            ),
+            'param_grid': {
+                'C':        [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0],
+                'l1_ratio': [0, 0.1, 0.3, 0.5, 0.7, 0.9],
+            },
+        },
+        'xgboost': {
+            'estimator': XGBClassifier(
+                objective='binary:logistic', eval_metric='logloss',
+                tree_method='hist', random_state=seed, n_jobs=1,
+                verbosity=0,
+            ),
+            'param_grid': {
+                'n_estimators':     [50, 100, 200, 400],
+                'max_depth':        [1, 2, 3, 6],
+                'learning_rate':    [0.01, 0.03, 0.1, 0.2, 0.3],
+                'min_child_weight': [1, 5, 10, 20, 50],
+                'reg_lambda':       [0.5, 1.0, 2.0],
+                'subsample':        [0.8, 1.0],
+                'colsample_bytree': [0.8, 1.0],
+            },
+        },
+        'svm_rbf': {
+            'estimator': SVC(
+                kernel='rbf', probability=True, class_weight='balanced',
+                random_state=seed,
+            ),
+            'param_grid': {
+                'C':     [0.1, 1.0, 10.0, 100.0, 200],
+                'gamma': ['scale', 0.001, 0.01, 0.1],
+            },
+        },
+    }
+
+
+def tune_base(name, spec, X_tr, y_tr, cv):
+    """GridSearchCV na pojedynczym bazowym modelu; zwraca best_estimator_."""
+    print(f"\n--- tuning {name} ---")
+    if name == 'xgboost':
+        pos = int((y_tr == 1).sum())
+        neg = int((y_tr == 0).sum())
+        spec['estimator'].set_params(scale_pos_weight=neg / max(pos, 1))
+    gs = GridSearchCV(
+        spec['estimator'], spec['param_grid'],
+        scoring='roc_auc', cv=cv, n_jobs=N_JOBS, refit=True,
+        return_train_score=False, verbose=0,
+    ).fit(X_tr, y_tr)
+    print(f"  best params : {gs.best_params_}")
+    print(f"  best CV AUC : {gs.best_score_:.4f}")
+    return gs.best_estimator_
 
 
 def youden_threshold(y_true, proba):
@@ -65,13 +133,10 @@ def youden_threshold(y_true, proba):
 
 
 def plot_calibration(y_true, proba_before, proba_after,
-                     out_png="svm_calibration.png", n_bins=5, hist_bins=20):
-    """Krzywa niezawodnosci (confidence vs accuracy) przed i po kalibracji
-    plus histogram przewidzianych prawdopodobienstw w rozbiciu na klasy.
-    Gora: os X to przewidziane prawdopodobienstwo, os Y to obserwowana
-    czestosc nowotworu, idealna kalibracja to przekatna. Dol: ile probek
-    kontroli i nowotworu trafia do kazdego kubelka prawdopodobienstwa,
-    co pokazuje kubelki zawierajace wylacznie nowotwor."""
+                     out_png="stacking_calibration.png",
+                     n_bins=5, hist_bins=20):
+    """Krzywa niezawodnosci przed i po kalibracji plus histogram
+    przewidzianych prawdopodobienstw w rozbiciu na klasy."""
     y_true = np.asarray(y_true)
     fig, (ax, axh) = plt.subplots(
         2, 1, figsize=(6, 8), sharex=True,
@@ -85,7 +150,7 @@ def plot_calibration(y_true, proba_before, proba_after,
         bs = brier_score_loss(y_true, proba)
         ax.plot(mean_pred, frac_pos, marker='o', label=f'{name} (Brier={bs:.3f})')
     ax.set_ylabel('Obserwowana częstość nowotworu (accuracy)')
-    ax.set_title('Krzywa niezawodności SVM RBF (przed vs po kalibracji)')
+    ax.set_title('Krzywa niezawodności stacking (przed vs po kalibracji)')
     ax.legend(); ax.grid(alpha=0.3)
 
     bins = np.linspace(0, 1, hist_bins + 1)
@@ -101,11 +166,9 @@ def plot_calibration(y_true, proba_before, proba_after,
     print(f"[OK] krzywa kalibracji + histogram -> {out_png}")
 
 
-def confusion_3x2(y_pred, y_index, ds, le, out_png="svm_confusion_3x2.png"):
+def confusion_3x2(y_pred, y_index, ds, le, out_png="stacking_confusion_3x2.png"):
     """Niekwadratowa macierz pomylek: prawdziwe 3 klasy (zdrowi, choroby
-    trzustki, nowotwor) wzgledem 2 klas przewidzianych (kontrola, nowotwor).
-    Pacjenci z chorobami trzustki w treningu naleza do klasy kontrolnej,
-    wiec ten widok pokazuje, ilu z nich model blednie wskazuje jako nowotwor."""
+    trzustki, nowotwor) wzgledem 2 klas przewidzianych (kontrola, nowotwor)."""
     true_group = ds.meta.loc[y_index, 'Group']
     pred_label = pd.Series(
         np.where(np.asarray(y_pred) == 1, le.classes_[1], le.classes_[0]),
@@ -139,6 +202,18 @@ def confusion_3x2(y_pred, y_index, ds, le, out_png="svm_confusion_3x2.png"):
     return cm
 
 
+def build_stacking(base_estimators, seed, cv_stack):
+    """StackingClassifier z meta-modelem LogReg, przewidujacy predict_proba."""
+    return StackingClassifier(
+        estimators=[(name, clone(est)) for name, est in base_estimators],
+        final_estimator=LogisticRegression(
+            max_iter=20000, class_weight='balanced', random_state=seed,
+        ),
+        stack_method='predict_proba',
+        cv=cv_stack, n_jobs=N_JOBS, passthrough=False,
+    )
+
+
 def main():
     # === panel genow ===
     if not os.path.exists(GENES_CSV):
@@ -154,11 +229,15 @@ def main():
     y_enc = pd.Series(le.fit_transform(ds.y), index=ds.y.index)
 
     X_tr_raw, X_te_raw, X_va_raw, y_train, y_test, y_valid = ds.get_train_test_valid_split(
-        ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE
+        ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
+        random_state=BASE_SEED,
     )
     X_te_raw = pd.concat([X_te_raw, X_va_raw])
     y_test   = pd.concat([y_test, y_valid])
 
+    missing = [g for g in selected_genes if g not in X_tr_raw.columns]
+    if missing:
+        raise ValueError(f"Geny z CSV nie sa dostepne: {missing[:5]}...")
     X_tr_raw = X_tr_raw[selected_genes]
     X_te_raw = X_te_raw[selected_genes]
 
@@ -176,37 +255,55 @@ def main():
     X_tr_deg_df = deg_pipe.fit_transform(X_tr_raw, y_train)
     X_te_deg_df = deg_pipe.transform(X_te_raw)
 
-    missing = [g for g in selected_genes if g not in X_tr_deg_df.columns]
-    if missing:
-        raise ValueError(f"Geny z CSV nie sa dostepne: {missing[:5]}...")
-
-    scaler = StandardScaler()
-    scaler.fit(X_tr_deg_df.values)
+    scaler = StandardScaler().fit(X_tr_deg_df.values)
     X_tr_z = scaler.transform(X_tr_deg_df.values)
     X_te_z = scaler.transform(X_te_deg_df.values)
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
-    # === SVM RBF + kalibracja ===
-    # foldy z wlasnej, wielokryterialnej stratyfikacji (ds.get_stratified_kfold)
-    folds = ds.get_stratified_kfold(X_tr_raw, y_train, n_splits=CALIB_CV, random_state=BASE_SEED)
-    clf = CalibratedClassifierCV(make_svm(), method=CALIB_METHOD, cv=folds)
-    clf.fit(X_tr_z, y_tr_np)
+    # === foldy CV ===
+    # GridSearch dla bazowych: wielokryterialna stratyfikacja (jak w skrypcie 5)
+    cv_grid = ds.get_stratified_kfold(
+        X_tr_raw, y_train, n_splits=GRID_CV_FOLDS, random_state=BASE_SEED,
+    )
+    # StackingClassifier wymaga partycji (cross_val_predict), fallback do
+    # sklearnowego StratifiedKFold ograniczonego przez liczbe probek mniej
+    # licznej klasy
+    cv_stack = StratifiedKFold(
+        n_splits=min(GRID_CV_FOLDS, int(np.bincount(y_tr_np).min())),
+        shuffle=True, random_state=BASE_SEED,
+    )
+    # CalibratedClassifierCV: takie same foldy jak w skrypcie 6
+    cv_calib = ds.get_stratified_kfold(
+        X_tr_raw, y_train, n_splits=CALIB_CV, random_state=BASE_SEED,
+    )
 
-    proba_tr = clf.predict_proba(X_tr_z)[:, 1]
-    proba_te = clf.predict_proba(X_te_z)[:, 1]
+    # === tuning bazowych modeli ===
+    grids = get_model_grids(BASE_SEED)
+    base_estimators = []
+    for name, spec in grids.items():
+        best = tune_base(name, spec, X_tr_z, y_tr_np, cv_grid)
+        base_estimators.append((name, best))
+
+    # === stacking po kalibracji ===
+    stack_calib = CalibratedClassifierCV(
+        build_stacking(base_estimators, BASE_SEED, cv_stack),
+        method=CALIB_METHOD, cv=cv_calib,
+    )
+    stack_calib.fit(X_tr_z, y_tr_np)
+
+    proba_tr = stack_calib.predict_proba(X_tr_z)[:, 1]
+    proba_te = stack_calib.predict_proba(X_te_z)[:, 1]
     auc_te = roc_auc_score(y_te_np, proba_te)
-    print(f"\n[SVM RBF skalibrowany] C={SVM_C}, gamma={SVM_GAMMA}, kalibracja={CALIB_METHOD}")
+    print(f"\n[stacking skalibrowany] kalibracja={CALIB_METHOD}, cv={CALIB_CV}")
+    print(f"Bazowe modele: {[n for n, _ in base_estimators]}")
     print(f"Holdout test AUC: {auc_te:.4f}")
 
     # === krzywa niezawodnosci: przed vs po kalibracji ===
-    # przed kalibracja: surowy SVM, decision_function przeskalowany do [0,1]
-    # zakresem z treningu (SVM nie ma natywnego predict_proba bez probability=True)
-    raw_svm = make_svm().fit(X_tr_z, y_tr_np)
-    dec_tr = raw_svm.decision_function(X_tr_z)
-    lo, hi = float(dec_tr.min()), float(dec_tr.max())
-    proba_before = np.clip(
-        (raw_svm.decision_function(X_te_z) - lo) / (hi - lo), 0.0, 1.0)
+    # stacking sam w sobie ma predict_proba (przez meta-LogReg), wiec proba_before
+    # bierzemy z surowego stackingu bez kalibracji
+    raw_stack = build_stacking(base_estimators, BASE_SEED, cv_stack).fit(X_tr_z, y_tr_np)
+    proba_before = raw_stack.predict_proba(X_te_z)[:, 1]
     plot_calibration(y_te_np, proba_before, proba_te, out_png=OUT_PNG_CALIB)
 
     # === prog decyzyjny z indeksu Youdena (wyznaczony na train) ===
