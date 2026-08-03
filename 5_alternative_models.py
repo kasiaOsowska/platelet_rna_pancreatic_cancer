@@ -38,7 +38,7 @@ from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, Confusio
 from xgboost import XGBClassifier
 
 from utilz.Dataset import load_dataset
-from utilz.constans import DISEASE, HEALTHY
+from utilz.constans import DISEASE, HEALTHY, CANCER
 from utilz.preprocessing_utilz import (
     ConstantExpressionReductor, Log2FCReductor, MannWhitneyReductor,
 )
@@ -64,6 +64,15 @@ OUT_PNG_BARS      = f"{OUT_DIR}/alt_models_test_auc.png"
 OUT_PNG_ROC       = f"{OUT_DIR}/alt_models_roc.png"
 OUT_PNG_CM        = f"{OUT_DIR}/alt_models_confusion.png"
 OUT_CSV_CM        = f"{OUT_DIR}/alt_models_confusion.csv"
+OUT_PNG_CM_3x2    = f"{OUT_DIR}/alt_models_confusion_3x2.png"
+OUT_CSV_CM_3x2    = f"{OUT_DIR}/alt_models_confusion_3x2.csv"
+
+# polskie etykiety klas na osiach macierzy 3x2
+PL_LABELS = {
+    HEALTHY: "zdrowe",
+    DISEASE: "choroby trzustki",
+    CANCER:  "nowotwór trzustki",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +205,23 @@ def youden_threshold(y_true, proba):
     return float(thr[np.argmax(tpr - fpr)])
 
 
+def confusion_3x2_single(y_pred, y_index, ds, le):
+    """Niekwadratowa macierz pomylek dla jednego modelu: 3 prawdziwe klasy
+    (HEALTHY, DISEASE, CANCER) wzgledem 2 klas przewidzianych (kontrola,
+    nowotwor) - jak confusion_3x2 w 6_svm_rbf_calibrated.py. Pacjenci DISEASE
+    w treningu naleza do klasy kontrolnej, wiec ten widok pokazuje, ilu z nich
+    model blednie wskazuje jako nowotwor."""
+    true_group = ds.meta.loc[y_index, 'Group']
+    pred_label = pd.Series(
+        np.where(np.asarray(y_pred) == 1, le.classes_[1], le.classes_[0]),
+        index=y_index, name='przewidziana',
+    )
+    row_order = [HEALTHY, DISEASE, CANCER]
+    col_order = [le.classes_[0], le.classes_[1]]
+    return (pd.crosstab(true_group, pred_label)
+              .reindex(index=row_order, columns=col_order, fill_value=0))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -211,15 +237,13 @@ def main():
 
     # === dane + split (taki sam jak w skrypcie 4) ===
     ds = load_dataset(data_path, meta_path, label_col="Group")
+    # DISEASE (choroby trzustki) traktujemy jako kontrole - jak w
+    # 6_svm_rbf_calibrated.py; ds.meta['Group'] zachowuje oryginalne 3 klasy,
+    # dzieki czemu macierz 3x2 pokazuje, jak modele klasyfikuja pacjentow DISEASE
     ds.y = ds.y.replace({DISEASE: HEALTHY})
 
-    """
-    drop_idx = ds.y.index[ds.y == DISEASE]
-    ds.X = ds.X.drop(index=drop_idx)
-    ds.meta = ds.meta.drop(index=drop_idx)
-    ds.y = ds.y.drop(index=drop_idx)
-    """
-    y_enc = pd.Series(LabelEncoder().fit_transform(ds.y), index=ds.y.index)
+    le = LabelEncoder()
+    y_enc = pd.Series(le.fit_transform(ds.y), index=ds.y.index)
 
     X_tr_raw, X_te_raw, X_va_raw, y_train, y_test, y_valid = ds.get_train_test_valid_split(
         ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
@@ -350,6 +374,56 @@ def main():
     pd.DataFrame(cm_rows).to_csv(OUT_CSV_CM, index=False)
     print(f"[OK] confusion matrices -> {OUT_PNG_CM}")
     print(f"[OK] confusion summary  -> {OUT_CSV_CM}")
+
+    # === niekwadratowe macierze 3x2 per model (3 klasy prawdziwe x 2 przewidziane) ===
+    # jak confusion_3x2 w 6_svm_rbf_calibrated.py, ale dla kazdego modelu osobno;
+    # ten sam prog Youdena (wyznaczony na train) co w bloku 2x2 powyzej
+    print("\n=== MACIERZE POMYLEK 3x2 (3 klasy prawdziwe x 2 przewidziane) ===")
+    n = len(results)
+    ncols = 2
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.6 * nrows))
+    axes = np.atleast_1d(axes).ravel()
+    cm3_rows = []
+    for ax, r in zip(axes, results):
+        thr = youden_threshold(y_tr_np, r['proba_tr'])
+        y_pred = (r['proba_te'] >= thr).astype(int)
+        cm = confusion_3x2_single(y_pred, y_test.index, ds, le)
+
+        print(f"\n--- {r['model']} (prog={thr:.4f}) ---")
+        print(cm.to_string())
+        for grp in cm.index:
+            cm3_rows.append({
+                'model': r['model'], 'prog_youden': round(thr, 4),
+                'prawdziwa_grupa': grp,
+                f'pred_{cm.columns[0]}': int(cm.loc[grp, cm.columns[0]]),
+                f'pred_{cm.columns[1]}': int(cm.loc[grp, cm.columns[1]]),
+            })
+
+        ax.imshow(cm.values, cmap='Blues')
+        ax.set_xticks(range(cm.shape[1]))
+        ax.set_xticklabels([PL_LABELS.get(c, c) for c in cm.columns],
+                           rotation=15, ha='right')
+        ax.set_yticks(range(cm.shape[0]))
+        ax.set_yticklabels([PL_LABELS.get(r_, r_) for r_ in cm.index])
+        vmax = cm.values.max()
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                v = int(cm.values[i, j])
+                ax.text(j, i, v, ha='center', va='center',
+                        color='white' if v > vmax / 2 else 'black')
+        ax.set_xlabel('Klasa przewidziana')
+        ax.set_ylabel('Klasa prawdziwa')
+        ax.set_title(f"{r['model']}\nprog={thr:.2f}")
+
+    # wylacz puste panele (gdy liczba modeli < nrows*ncols)
+    for ax in axes[n:]:
+        ax.axis('off')
+
+    plt.tight_layout(h_pad=3.0); plt.savefig(OUT_PNG_CM_3x2, dpi=140); plt.show()
+    pd.DataFrame(cm3_rows).to_csv(OUT_CSV_CM_3x2, index=False)
+    print(f"[OK] macierze 3x2     -> {OUT_PNG_CM_3x2}")
+    print(f"[OK] podsumowanie 3x2 -> {OUT_CSV_CM_3x2}")
 
 
 if __name__ == '__main__':
