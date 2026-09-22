@@ -1,9 +1,16 @@
-"""
-Samodzielny skrypt: SVM RBF na panelu genow PLA2Sig, skalibrowany
-(CalibratedClassifierCV) tak, aby zwracal prawdopodobienstwa przynaleznosci
-do klasy. Uzywa tego samego splitu, DEG-preprocessingu i panelu genow co
-5_alternative_models.py. Raport klasyfikacji przez show_report, krzywa
-niezawodnosci przed i po kalibracji oraz niekwadratowa macierz pomylek.
+"""Calibrated RBF SVM classifier on the selected gene panel.
+
+Methodology: same split, covariate correction and gene panel as
+5_alternative_models.py. An RBF SVM with fixed C and gamma is wrapped in
+CalibratedClassifierCV (sigmoid/Platt scaling) using multi-criteria stratified folds,
+so the model returns usable class probabilities. Reliability is assessed by comparing
+calibration curves and Brier scores before and after calibration, where the
+uncalibrated reference is the raw SVM decision function rescaled to [0,1] by its
+training range, together with a histogram of predicted probabilities per class. The
+decision threshold maximizing the Youden index is determined on the training set and
+applied to the holdout test set, reported as a classification report, a 2x2 confusion
+matrix, metadata of misclassified samples, and a 3x2 confusion matrix of the three
+original groups against the two predicted classes.
 """
 
 import warnings
@@ -31,9 +38,6 @@ from utilz.multi_residual_bootstrap import (
     MultiCovariateResidualBootstrapTransformer, build_covariates,
 )
 
-# ---------------------------------------------------------------------------
-# Konfiguracja - zgodna z 5_alternative_models.py
-# ---------------------------------------------------------------------------
 meta_path = r"../data/samples_pancreatic.xlsx"
 data_path = r"../data/counts_pancreatic.csv"
 GENES_CSV = "4_forward_selection/forward_selection_genes.csv"
@@ -59,19 +63,12 @@ def make_svm():
 
 
 def youden_threshold(y_true, proba):
-    """Prog decyzyjny maksymalizujacy indeks Youdena J = TPR - FPR."""
     fpr, tpr, thr = roc_curve(y_true, proba)
     return float(thr[np.argmax(tpr - fpr)])
 
 
 def plot_calibration(y_true, proba_before, proba_after,
                      out_png="svm_calibration.png", n_bins=5, hist_bins=20):
-    """Krzywa niezawodnosci (confidence vs accuracy) przed i po kalibracji
-    plus histogram przewidzianych prawdopodobienstw w rozbiciu na klasy.
-    Gora: os X to przewidziane prawdopodobienstwo, os Y to obserwowana
-    czestosc nowotworu, idealna kalibracja to przekatna. Dol: ile probek
-    kontroli i nowotworu trafia do kazdego kubelka prawdopodobienstwa,
-    co pokazuje kubelki zawierajace wylacznie nowotwor."""
     y_true = np.asarray(y_true)
     fig, (ax, axh) = plt.subplots(
         2, 1, figsize=(6, 8), sharex=True,
@@ -102,10 +99,6 @@ def plot_calibration(y_true, proba_before, proba_after,
 
 
 def confusion_3x2(y_pred, y_index, ds, le, out_png="svm_confusion_3x2.png"):
-    """Niekwadratowa macierz pomylek: prawdziwe 3 klasy (zdrowi, choroby
-    trzustki, nowotwor) wzgledem 2 klas przewidzianych (kontrola, nowotwor).
-    Pacjenci z chorobami trzustki w treningu naleza do klasy kontrolnej,
-    wiec ten widok pokazuje, ilu z nich model blednie wskazuje jako nowotwor."""
     true_group = ds.meta.loc[y_index, 'Group']
     pred_label = pd.Series(
         np.where(np.asarray(y_pred) == 1, le.classes_[1], le.classes_[0]),
@@ -140,14 +133,12 @@ def confusion_3x2(y_pred, y_index, ds, le, out_png="svm_confusion_3x2.png"):
 
 
 def main():
-    # === panel genow ===
     if not os.path.exists(GENES_CSV):
         raise FileNotFoundError(f"Brak {GENES_CSV} - uruchom najpierw selekcje genow.")
     genes_df = pd.read_csv(GENES_CSV)
     selected_genes = genes_df.loc[genes_df['gene'] != '__intercept__', 'gene'].tolist()
     print(f"[INFO] wczytano {len(selected_genes)} genow z {GENES_CSV}")
 
-    # === dane + split (taki sam jak w skrypcie 5) ===
     ds = load_dataset(data_path, meta_path, label_col="Group")
     ds.y = ds.y.replace({DISEASE: HEALTHY})
     le = LabelEncoder()
@@ -165,7 +156,6 @@ def main():
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
-    # === DEG preprocessing (taki sam jak w skrypcie 5) ===
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
         ('multi_resid', MultiCovariateResidualBootstrapTransformer(
@@ -187,8 +177,6 @@ def main():
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
-    # === SVM RBF + kalibracja ===
-    # foldy z wlasnej, wielokryterialnej stratyfikacji (ds.get_stratified_kfold)
     folds = ds.get_stratified_kfold(X_tr_raw, y_train, n_splits=CALIB_CV, random_state=BASE_SEED)
     clf = CalibratedClassifierCV(make_svm(), method=CALIB_METHOD, cv=folds)
     clf.fit(X_tr_z, y_tr_np)
@@ -199,9 +187,6 @@ def main():
     print(f"\n[SVM RBF skalibrowany] C={SVM_C}, gamma={SVM_GAMMA}, kalibracja={CALIB_METHOD}")
     print(f"Holdout test AUC: {auc_te:.4f}")
 
-    # === krzywa niezawodnosci: przed vs po kalibracji ===
-    # przed kalibracja: surowy SVM, decision_function przeskalowany do [0,1]
-    # zakresem z treningu (SVM nie ma natywnego predict_proba bez probability=True)
     raw_svm = make_svm().fit(X_tr_z, y_tr_np)
     dec_tr = raw_svm.decision_function(X_tr_z)
     lo, hi = float(dec_tr.min()), float(dec_tr.max())
@@ -209,12 +194,10 @@ def main():
         (raw_svm.decision_function(X_te_z) - lo) / (hi - lo), 0.0, 1.0)
     plot_calibration(y_te_np, proba_before, proba_te, out_png=OUT_PNG_CALIB)
 
-    # === prog decyzyjny z indeksu Youdena (wyznaczony na train) ===
     thr = youden_threshold(y_tr_np, proba_tr)
     y_pred = (proba_te >= thr).astype(int)
     print(f"Prog Youdena (z train): {thr:.4f}")
 
-    # === raport klasyfikacji ===
     print("\n=== classification_report (test) ===")
     print(classification_report(y_te_np, y_pred, target_names=le.classes_, digits=3))
     print("Macierz pomylek [[TN FP] [FN TP]]:")
@@ -223,7 +206,6 @@ def main():
     print("\n=== show_report (metadane probek FN/FP) ===")
     show_report(y_pred, y_test, ds, le)
 
-    # === niekwadratowa macierz pomylek: 3 klasy prawdziwe x 2 przewidziane ===
     confusion_3x2(y_pred, y_test.index, ds, le, out_png=OUT_PNG_CM_3x2)
 
 

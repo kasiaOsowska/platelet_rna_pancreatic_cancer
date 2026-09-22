@@ -1,7 +1,10 @@
-"""
-Wizualizacja panelu biomarkerow: zgrupowany boxplot ekspresji (z-score per gen)
-w rozbiciu na grupy (kontrola, choroby trzustki, nowotwor) na jednej rycinie.
-Etykiety pozostaja oryginalne (3 grupy), bez scalania.
+"""Boxplots of biomarker panel expression across the three sample groups.
+
+Methodology: loads the full dataset without splitting or merging labels, and draws one
+grouped boxplot of raw expression per panel gene, split by the original three groups
+(asymptomatic controls, benign pancreatic diseases, pancreatic cancer). Genes are
+ordered along the x axis by their mean signed coefficient from stability selection, so
+down-regulated genes appear before up-regulated ones.
 """
 
 import warnings
@@ -21,8 +24,6 @@ data_path = r"../data/counts_pancreatic.csv"
 
 OUT_PNG_BOX = f"{OUT_DIR}/biomarker_panel_box.png"
 
-# wspolczynniki mean_signed_coef z selekcji stabilnosci
-# (ujemny = obnizony, dodatni = podwyzszony w nowotworze); sluza do uszeregowania osi X
 PANEL_COEF = {
     'PLD4':    -0.128,
     'ITGB3BP': -0.186,
@@ -38,15 +39,10 @@ PANEL_COEF = {
 }
 
 
-def main():
-    ds = load_dataset(data_path, meta_path, label_col="Group")
-    plot_panel_boxplots(
-        ds.X, ds.y.values, BIOMARKER_PANEL,
-        gene_coef=PANEL_COEF,
-        zscore=False,
-        save_path=OUT_PNG_BOX,
-    )
-
-
-if __name__ == '__main__':
-    main()
+ds = load_dataset(data_path, meta_path, label_col="Group")
+plot_panel_boxplots(
+    ds.X, ds.y.values, BIOMARKER_PANEL,
+    gene_coef=PANEL_COEF,
+    zscore=False,
+    save_path=OUT_PNG_BOX,
+)

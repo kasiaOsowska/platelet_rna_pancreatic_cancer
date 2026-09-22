@@ -1,7 +1,14 @@
-"""
-Replikacja metody selekcji genow z PLA2Sig (Ji et al., BJC 2025).
-DEG (log2FC + Mann-Whitney) -> LASSO 100-fold CV (lambda.1se)
--> inkrementalne top-k -> binomial GLM.
+"""Replication of the PLA2Sig gene selection method (Ji et al., BJC 2025).
+
+Methodology: same stratified train/test split as the other scripts. Differential
+expression filtering on the training set removes constant genes and keeps genes with
+|log2 fold change| above a threshold and a Mann-Whitney U p-value below 0.05. The
+surviving genes are standardized and passed to L1-penalized logistic regression tuned
+by 100-fold cross-validation, where the penalty is chosen by the one-standard-error
+rule on log loss; genes with non-zero coefficients are ranked by absolute coefficient.
+Incremental top-k evaluation reports CV and holdout AUC for growing panels, k* is the
+smallest panel within DELTA_AUC_SIG of the best CV AUC, and an unpenalized binomial GLM
+is fitted on the saved panel.
 """
 
 import warnings;
@@ -53,7 +60,7 @@ def lasso_cv_lambda_1se(X, y, n_folds=LASSO_CV_FOLDS,
         Cs=n_lambdas, cv=skf, penalty='l1', solver='saga',
         scoring='neg_log_loss', class_weight='balanced',
         max_iter=20000, n_jobs=-1, random_state=seed, refit=False,
-    ).fit(X, y) 
+    ).fit(X, y)
 
     losses = -cv.scores_[1]
     mean_loss = losses.mean(axis=0)
@@ -117,7 +124,6 @@ def main():
         ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
         random_state=BASE_SEED,
     )
-    # walidacyjny niepotrzebny -> doklejamy do test setu (split deterministyczny)
     X_te_raw = pd.concat([X_te_raw, X_va_raw])
     y_test   = pd.concat([y_test, y_valid])
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")

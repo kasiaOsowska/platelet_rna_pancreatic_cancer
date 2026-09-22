@@ -1,3 +1,17 @@
+"""Plotting and reporting helpers shared by the analysis scripts.
+
+show_report lists the metadata of false negative and false positive samples for a
+binary prediction. plot_pca standardizes the expression matrix, runs PCA and draws
+every pair of components with the explained variance ratio on the axes.
+plot_scatter_boxplot draws expression of one gene per group with an overlaid strip plot
+and group means, adding a combined disease-and-cancer group when both are present.
+plot_panel_boxplots draws a grouped boxplot of a whole gene panel, optionally z-scored
+per gene and ordered by supplied model coefficients. plot_roc_curve draws a ROC curve
+with its AUC. plot_split_balance and plot_group_overview compare the composition of
+data splits or sample groups in terms of class, sex, age, tumour stage and sequencing
+depth.
+"""
+
 import os
 
 import os
@@ -41,7 +55,7 @@ def show_report(y_pred, y_test_encoded, dataset, le):
                 "TN": TN_idx,
             }
 
-            for key in ["FN", "FP"]: #["TP", "FP", "FN", "TN"]:
+            for key in ["FN", "FP"]:
                 print(f"\n--- {key} samples metadata ---")
                 for idx in results[cls][key]:
                     sample_meta = dataset.meta.loc[idx]
@@ -137,9 +151,6 @@ def plot_scatter_boxplot(X, y, gene_name):
 
 
 def plot_panel_boxplots(X, y, gene_map, gene_coef=None, group_order=None, showfliers=False, zscore=True, save_path=None):
-    """Zgrupowany boxplot ekspresji panelu genow (z-score per gen) w rozbiciu
-    na grupy. X to DataFrame probki x geny (kolumny ENSG), y to etykiety grup,
-    gene_map to dict ENSG -> symbol; kolejnosc kluczy wyznacza kolejnosc na osi X."""
     genes = [g for g in gene_map if g in X.columns]
     gene_order = [gene_map[g] for g in genes]
     sub = X[genes].astype(float)
@@ -198,14 +209,6 @@ def plot_roc_curve(X, y, title):
 
 
 def plot_split_balance(splits: dict):
-    """
-    splits = {
-        'Train': (y_train, sex_train, age_train, stage_train),
-        'Test':  (y_test,  sex_test,  age_test,  stage_test),
-        'Valid': (y_valid, sex_valid, age_valid,  stage_valid),
-    }
-    save_path: jeśli podane, zapisuje wykres do pliku PNG (wymaga pakietu kaleido).
-    """
     COLORS = {'Train': '#6366f1', 'Test': '#22d3ee', 'Valid': '#f59e0b'}
     LABELS = {'Train': 'Treningowy', 'Test': 'Testowy', 'Valid': 'Walidacyjny'}
     names = list(splits.keys())
@@ -273,9 +276,7 @@ def plot_split_balance(splits: dict):
     fig.show()
 
 
-
 def _to_rgba(color: str, alpha: float = 0.7) -> str:
-    """Hex/rgb -> 'rgba(r,g,b,a)'. Nazwy kolorow zwracane bez zmian."""
     c = color.strip()
     if c.startswith('#'):
         c = c.lstrip('#')
@@ -324,7 +325,6 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
     for s in names:
         color = colors[s]
         color_a = _to_rgba(color, 0.7)
-        # --- Sex distribution: % na osi Y + "n=X (Y%)" na słupku, jedyny trace z legenda ---
         y_sex_pct = [sex_counts[s].get(sv, 0) for sv in sex_vals]
         y_sex_cnt = [sex_raw[s].get(sv, 0)    for sv in sex_vals]
         labels    = [f"n={cnt}<br>({pct:.0%})"
@@ -339,7 +339,6 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
             showlegend=True,
         ), row=1, col=1)
 
-        # --- Age distribution: boxplot ---
         fig.add_trace(go.Box(
             name=s, y=age_data[s],
             line=dict(color=color),
@@ -350,7 +349,6 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
             showlegend=False,
         ), row=1, col=2)
 
-        # --- Libsize boxplot (jesli dane podane) ---
         if has_libsize and s in libsize_data:
             fig.add_trace(go.Box(
                 name=s, y=libsize_data[s],
@@ -378,7 +376,7 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
     if white_bg:
         layout_kwargs.update(
             paper_bgcolor='white', plot_bgcolor='white',
-            font=dict(color='black'),     # caly tekst (osie, tytul, legenda, etykiety)
+            font=dict(color='black'),
             title_font=dict(color='black'),
         )
 
@@ -397,10 +395,8 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
         )
         fig.update_xaxes(**axis_style)
         fig.update_yaxes(**axis_style)
-        # podtytuly subplot ("Sex distribution" / "Age distribution") - czarne
         for ann in fig.layout.annotations:
             ann.font = dict(color='black', size=ann.font.size or 14)
-        # etykiety "n=X (Y%)" nad slupkami w panelu Sex
         for tr in fig.data:
             if isinstance(tr, go.Bar):
                 tr.textfont = dict(color='black')
@@ -413,7 +409,6 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
         if suffix == '.html':
             fig.write_html(str(save_path))
         else:
-            # PNG/PDF/SVG/JPEG przez kaleido; scale=2 -> wieksza rozdzielczosc
             fig.write_image(str(save_path), scale=2)
         print(f"[OK] zapisano: {save_path.resolve()}")
 

@@ -1,16 +1,16 @@
-"""
-Porownanie alternatywnych modeli na zestawie genow wybranych przez PLA2Sig.
-Uzywa tego samego splitu train/test co 4_pla2sig_gene_selection.py,
-tego samego DEG-preprocessingu i zestawu k* genow zapisanych w CSV.
+"""Comparison of alternative classifiers on the selected gene panel.
 
-Modele:
-  - LogisticRegression z ElasticNet (GridSearch po C, l1_ratio)
-  - XGBoost              (GridSearch po n_estimators, max_depth, lr)
-  - SVM RBF              (GridSearch po C, gamma)
-  - siec neuronowa (MLP, 2 warstwy ukryte; GridSearch po hidden_layer_sizes, alpha, lr)
-
-Wszystkie hiperparametry tuningowane przez wielokryterialne stratyfikowane
-foldy z ds.get_stratified_kfold na train, ostateczna ewaluacja na holdoutowym test secie.
+Methodology: loads the panel produced by forward selection and reuses the same
+train/test split and covariate correction (multi-covariate residual bootstrap on
+age, sex and log10 library size, applied to all panel genes) followed by
+standardization. Four models are compared: elastic-net logistic regression, XGBoost,
+RBF SVM - each tuned by grid search over multi-criteria stratified folds on the
+training set - and a stacking ensemble of the three tuned models with a logistic
+regression meta-learner (stacking falls back to plain StratifiedKFold because
+cross_val_predict requires a partition). Evaluation on the holdout test set: AUC bar
+plot, ROC curves, 2x2 confusion matrices at the Youden threshold determined on the
+training set, and 3x2 confusion matrices that keep the original three groups as true
+labels to show how patients with benign pancreatic disease are classified.
 """
 
 import warnings
@@ -46,9 +46,6 @@ from utilz.multi_residual_bootstrap import (
     MultiCovariateResidualBootstrapTransformer, build_covariates,
 )
 
-# ---------------------------------------------------------------------------
-# Konfiguracja - musi byc zgodna z 4_pla2sig_gene_selection.py
-# ---------------------------------------------------------------------------
 meta_path        = r"../data/samples_pancreatic.xlsx"
 data_path        = r"../data/counts_pancreatic.csv"
 GENES_CSV        = "4_forward_selection/forward_selection_genes.csv"
@@ -67,7 +64,6 @@ OUT_CSV_CM        = f"{OUT_DIR}/alt_models_confusion.csv"
 OUT_PNG_CM_3x2    = f"{OUT_DIR}/alt_models_confusion_3x2.png"
 OUT_CSV_CM_3x2    = f"{OUT_DIR}/alt_models_confusion_3x2.csv"
 
-# polskie etykiety klas na osiach macierzy 3x2
 PL_LABELS = {
     HEALTHY: "zdrowe",
     DISEASE: "choroby trzustki",
@@ -75,9 +71,6 @@ PL_LABELS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Modele + siatki
-# ---------------------------------------------------------------------------
 def get_model_grids(seed):
     return {
 
@@ -125,8 +118,6 @@ def fit_and_eval(name, spec, X_tr, y_tr, X_te, y_te, cv, seed):
     print(f"\n--- {name} ---")
     fit_params = {}
     if name == 'xgboost':
-        # XGB nie ma class_weight='balanced'; ustawiamy scale_pos_weight
-        # na stosunek liczby probek klasy ujemnej do liczby probek klasy dodatniej
         pos = int((y_tr == 1).sum())
         neg = int((y_tr == 0).sum())
         spec['estimator'].set_params(scale_pos_weight=neg / max(pos, 1))
@@ -161,7 +152,6 @@ def fit_and_eval(name, spec, X_tr, y_tr, X_te, y_te, cv, seed):
 
 
 def fit_and_eval_stacking(base_results, X_tr, y_tr, X_te, y_te, cv, seed):
-    """Stacking na 3 nastrojonych modelach bazowych; meta-model: regresja logistyczna."""
     print(f"\n--- stacking ---")
     estimators = [(r['model'], clone(r['estimator'])) for r in base_results]
     stack = StackingClassifier(
@@ -200,17 +190,11 @@ def fit_and_eval_stacking(base_results, X_tr, y_tr, X_te, y_te, cv, seed):
 
 
 def youden_threshold(y_true, proba):
-    """Prog decyzyjny maksymalizujacy indeks Youdena J = TPR - FPR."""
     fpr, tpr, thr = roc_curve(y_true, proba)
     return float(thr[np.argmax(tpr - fpr)])
 
 
 def confusion_3x2_single(y_pred, y_index, ds, le):
-    """Niekwadratowa macierz pomylek dla jednego modelu: 3 prawdziwe klasy
-    (HEALTHY, DISEASE, CANCER) wzgledem 2 klas przewidzianych (kontrola,
-    nowotwor) - jak confusion_3x2 w 6_svm_rbf_calibrated.py. Pacjenci DISEASE
-    w treningu naleza do klasy kontrolnej, wiec ten widok pokazuje, ilu z nich
-    model blednie wskazuje jako nowotwor."""
     true_group = ds.meta.loc[y_index, 'Group']
     pred_label = pd.Series(
         np.where(np.asarray(y_pred) == 1, le.classes_[1], le.classes_[0]),
@@ -222,11 +206,7 @@ def confusion_3x2_single(y_pred, y_index, ds, le):
               .reindex(index=row_order, columns=col_order, fill_value=0))
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
-    # === geny z PLA2Sig ===
     if not os.path.exists(GENES_CSV):
         raise FileNotFoundError(
             f"Brak {GENES_CSV} - uruchom najpierw 4_pla2sig_gene_selection.py"
@@ -235,11 +215,7 @@ def main():
     selected_genes = genes_df.loc[genes_df['gene'] != '__intercept__', 'gene'].tolist()
     print(f"[INFO] wczytano {len(selected_genes)} genow z {GENES_CSV}")
 
-    # === dane + split (taki sam jak w skrypcie 4) ===
     ds = load_dataset(data_path, meta_path, label_col="Group")
-    # DISEASE (choroby trzustki) traktujemy jako kontrole - jak w
-    # 6_svm_rbf_calibrated.py; ds.meta['Group'] zachowuje oryginalne 3 klasy,
-    # dzieki czemu macierz 3x2 pokazuje, jak modele klasyfikuja pacjentow DISEASE
     ds.y = ds.y.replace({DISEASE: HEALTHY})
 
     le = LabelEncoder()
@@ -249,11 +225,9 @@ def main():
         ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
         random_state=BASE_SEED,
     )
-    # walidacyjny niepotrzebny -> doklejamy do test setu (split deterministyczny)
     X_te_raw = pd.concat([X_te_raw, X_va_raw])
     y_test   = pd.concat([y_test, y_valid])
 
-    # restrykcja do panelu 12 genow PRZED pipeline'em - modele uczone tylko na nich
     missing = [g for g in selected_genes if g not in X_tr_raw.columns]
     if missing:
         raise ValueError(f"Geny z CSV nie sa dostepne w danych: {missing[:5]}...")
@@ -264,8 +238,6 @@ def main():
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
 
-    # === korekcja zmiennych zaklocajacych na panelu 12 genow ===
-    # parametry rozluznione, zeby skorygowac wszystkie 12 genow, a nie podzbior
     print("\n=== korekcja na 12 genach panelu ===")
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
@@ -283,13 +255,7 @@ def main():
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
-    # === fit modeli ===
-    # foldy z wlasnej, wielokryterialnej stratyfikacji (ds.get_stratified_kfold)
     cv = ds.get_stratified_kfold(X_tr_raw, y_train, n_splits=GRID_CV_FOLDS, random_state=BASE_SEED)
-    # stacking uzywa wewnetrznie cross_val_predict, ktory wymaga partycji
-    # (kazda probka w dokladnie jednym foldzie testowym); ds.get_stratified_kfold
-    # dokleja remainder do treningu w kazdym foldzie, wiec dla stackingu fallback
-    # do sklearnowego StratifiedKFold
     cv_stack = StratifiedKFold(
         n_splits=min(GRID_CV_FOLDS, int(np.bincount(y_tr_np).min())),
         shuffle=True, random_state=BASE_SEED,
@@ -302,19 +268,16 @@ def main():
             name, spec, X_tr_z, y_tr_np, X_te_z, y_te_np, cv, BASE_SEED,
         ))
 
-    # === stacking na 3 modelach bazowych ===
     results.append(fit_and_eval_stacking(
         results, X_tr_z, y_tr_np, X_te_z, y_te_np, cv_stack, BASE_SEED,
     ))
 
-    # === podsumowanie ===
     summary = pd.DataFrame([{k: v for k, v in r.items()
                              if k not in ('proba_te', 'estimator')}
                             for r in results])
     print("\n=== PODSUMOWANIE ===")
     print(summary.to_string(index=False))
 
-    # === wykres slupkowy CV vs test ===
     fig, ax = plt.subplots(figsize=(8, 4.5))
     x = np.arange(len(results))
     w = 0.35
@@ -332,7 +295,6 @@ def main():
     plt.tight_layout(); plt.savefig(OUT_PNG_BARS, dpi=140); plt.show()
     print(f"[OK] bar plot -> {OUT_PNG_BARS}")
 
-    # === ROC na tescie ===
     fig, ax = plt.subplots(figsize=(6, 6))
     for r in results:
         fpr, tpr, _ = roc_curve(y_te_np, r['proba_te'])
@@ -343,7 +305,6 @@ def main():
     plt.tight_layout(); plt.savefig(OUT_PNG_ROC, dpi=140); plt.show()
     print(f"[OK] ROC plot  -> {OUT_PNG_ROC}")
 
-    # === macierze pomylek przy progu Youdena (prog z train, ocena na test) ===
     print("\n=== MACIERZE POMYLEK (prog Youdena wyznaczony na train) ===")
     n = len(results)
     fig, axes = plt.subplots(1, n, figsize=(4 * n, 4))
@@ -375,9 +336,6 @@ def main():
     print(f"[OK] confusion matrices -> {OUT_PNG_CM}")
     print(f"[OK] confusion summary  -> {OUT_CSV_CM}")
 
-    # === niekwadratowe macierze 3x2 per model (3 klasy prawdziwe x 2 przewidziane) ===
-    # jak confusion_3x2 w 6_svm_rbf_calibrated.py, ale dla kazdego modelu osobno;
-    # ten sam prog Youdena (wyznaczony na train) co w bloku 2x2 powyzej
     print("\n=== MACIERZE POMYLEK 3x2 (3 klasy prawdziwe x 2 przewidziane) ===")
     n = len(results)
     ncols = 2
@@ -416,7 +374,6 @@ def main():
         ax.set_ylabel('Klasa prawdziwa')
         ax.set_title(f"{r['model']}\nprog={thr:.2f}")
 
-    # wylacz puste panele (gdy liczba modeli < nrows*ncols)
     for ax in axes[n:]:
         ax.axis('off')
 

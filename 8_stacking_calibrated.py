@@ -1,12 +1,16 @@
-"""
-Samodzielny skrypt: model stacking (LogReg ElasticNet + XGBoost + SVM RBF
-jako bazowe; LogReg jako meta-model) na panelu genow PLA2Sig, skalibrowany
-(CalibratedClassifierCV) tak, aby zwracal sensowne prawdopodobienstwa
-przynaleznosci do klasy. Uzywa tego samego splitu, DEG-preprocessingu i
-panelu genow co 5_alternative_models.py. Bazowe modele tuningowane przez
-GridSearchCV (jak w skrypcie 5), nastepnie stacking owijany w
-CalibratedClassifierCV. Raport klasyfikacji przez show_report, krzywa
-niezawodnosci przed i po kalibracji oraz niekwadratowa macierz pomylek.
+"""Calibrated stacking ensemble on the selected gene panel.
+
+Methodology: same split, covariate correction and gene panel as
+5_alternative_models.py. Elastic-net logistic regression, XGBoost and an RBF SVM are
+first tuned by grid search over multi-criteria stratified folds, then combined in a
+stacking classifier with a logistic regression meta-learner (plain StratifiedKFold
+inside the stack, since cross_val_predict requires a partition), and the whole stack is
+wrapped in CalibratedClassifierCV with sigmoid calibration. Reliability is assessed by
+comparing calibration curves and Brier scores of the raw and calibrated stack plus a
+histogram of predicted probabilities per class. The Youden-optimal threshold is taken
+from the training set and applied to the holdout test set, reported as a classification
+report, a 2x2 confusion matrix, metadata of misclassified samples, and a 3x2 confusion
+matrix of the three original groups against the two predicted classes.
 """
 
 import warnings
@@ -43,9 +47,6 @@ from utilz.multi_residual_bootstrap import (
     MultiCovariateResidualBootstrapTransformer, build_covariates,
 )
 
-# ---------------------------------------------------------------------------
-# Konfiguracja - zgodna z 5_alternative_models.py / 6_svm_rbf_calibrated.py
-# ---------------------------------------------------------------------------
 meta_path = r"../data/samples_pancreatic.xlsx"
 data_path = r"../data/counts_pancreatic.csv"
 GENES_CSV = "4_forward_selection/forward_selection_genes.csv"
@@ -64,9 +65,6 @@ CALIB_METHOD = 'sigmoid'
 CALIB_CV     = 10
 
 
-# ---------------------------------------------------------------------------
-# Bazowe modele + siatki (te same co w 5_alternative_models.py)
-# ---------------------------------------------------------------------------
 def get_model_grids(seed):
     return {
         'logreg_elasticnet': {
@@ -110,7 +108,6 @@ def get_model_grids(seed):
 
 
 def tune_base(name, spec, X_tr, y_tr, cv):
-    """GridSearchCV na pojedynczym bazowym modelu; zwraca best_estimator_."""
     print(f"\n--- tuning {name} ---")
     if name == 'xgboost':
         pos = int((y_tr == 1).sum())
@@ -127,7 +124,6 @@ def tune_base(name, spec, X_tr, y_tr, cv):
 
 
 def youden_threshold(y_true, proba):
-    """Prog decyzyjny maksymalizujacy indeks Youdena J = TPR - FPR."""
     fpr, tpr, thr = roc_curve(y_true, proba)
     return float(thr[np.argmax(tpr - fpr)])
 
@@ -135,8 +131,6 @@ def youden_threshold(y_true, proba):
 def plot_calibration(y_true, proba_before, proba_after,
                      out_png="stacking_calibration.png",
                      n_bins=5, hist_bins=20):
-    """Krzywa niezawodnosci przed i po kalibracji plus histogram
-    przewidzianych prawdopodobienstw w rozbiciu na klasy."""
     y_true = np.asarray(y_true)
     fig, (ax, axh) = plt.subplots(
         2, 1, figsize=(6, 8), sharex=True,
@@ -167,8 +161,6 @@ def plot_calibration(y_true, proba_before, proba_after,
 
 
 def confusion_3x2(y_pred, y_index, ds, le, out_png="stacking_confusion_3x2.png"):
-    """Niekwadratowa macierz pomylek: prawdziwe 3 klasy (zdrowi, choroby
-    trzustki, nowotwor) wzgledem 2 klas przewidzianych (kontrola, nowotwor)."""
     true_group = ds.meta.loc[y_index, 'Group']
     pred_label = pd.Series(
         np.where(np.asarray(y_pred) == 1, le.classes_[1], le.classes_[0]),
@@ -203,7 +195,6 @@ def confusion_3x2(y_pred, y_index, ds, le, out_png="stacking_confusion_3x2.png")
 
 
 def build_stacking(base_estimators, seed, cv_stack):
-    """StackingClassifier z meta-modelem LogReg, przewidujacy predict_proba."""
     return StackingClassifier(
         estimators=[(name, clone(est)) for name, est in base_estimators],
         final_estimator=LogisticRegression(
@@ -215,14 +206,12 @@ def build_stacking(base_estimators, seed, cv_stack):
 
 
 def main():
-    # === panel genow ===
     if not os.path.exists(GENES_CSV):
         raise FileNotFoundError(f"Brak {GENES_CSV} - uruchom najpierw selekcje genow.")
     genes_df = pd.read_csv(GENES_CSV)
     selected_genes = genes_df.loc[genes_df['gene'] != '__intercept__', 'gene'].tolist()
     print(f"[INFO] wczytano {len(selected_genes)} genow z {GENES_CSV}")
 
-    # === dane + split (taki sam jak w skrypcie 5) ===
     ds = load_dataset(data_path, meta_path, label_col="Group")
     ds.y = ds.y.replace({DISEASE: HEALTHY})
     le = LabelEncoder()
@@ -244,7 +233,6 @@ def main():
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
-    # === DEG preprocessing (taki sam jak w skrypcie 5) ===
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
         ('multi_resid', MultiCovariateResidualBootstrapTransformer(
@@ -261,31 +249,23 @@ def main():
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
-    # === foldy CV ===
-    # GridSearch dla bazowych: wielokryterialna stratyfikacja (jak w skrypcie 5)
     cv_grid = ds.get_stratified_kfold(
         X_tr_raw, y_train, n_splits=GRID_CV_FOLDS, random_state=BASE_SEED,
     )
-    # StackingClassifier wymaga partycji (cross_val_predict), fallback do
-    # sklearnowego StratifiedKFold ograniczonego przez liczbe probek mniej
-    # licznej klasy
     cv_stack = StratifiedKFold(
         n_splits=min(GRID_CV_FOLDS, int(np.bincount(y_tr_np).min())),
         shuffle=True, random_state=BASE_SEED,
     )
-    # CalibratedClassifierCV: takie same foldy jak w skrypcie 6
     cv_calib = ds.get_stratified_kfold(
         X_tr_raw, y_train, n_splits=CALIB_CV, random_state=BASE_SEED,
     )
 
-    # === tuning bazowych modeli ===
     grids = get_model_grids(BASE_SEED)
     base_estimators = []
     for name, spec in grids.items():
         best = tune_base(name, spec, X_tr_z, y_tr_np, cv_grid)
         base_estimators.append((name, best))
 
-    # === stacking po kalibracji ===
     stack_calib = CalibratedClassifierCV(
         build_stacking(base_estimators, BASE_SEED, cv_stack),
         method=CALIB_METHOD, cv=cv_calib,
@@ -299,19 +279,14 @@ def main():
     print(f"Bazowe modele: {[n for n, _ in base_estimators]}")
     print(f"Holdout test AUC: {auc_te:.4f}")
 
-    # === krzywa niezawodnosci: przed vs po kalibracji ===
-    # stacking sam w sobie ma predict_proba (przez meta-LogReg), wiec proba_before
-    # bierzemy z surowego stackingu bez kalibracji
     raw_stack = build_stacking(base_estimators, BASE_SEED, cv_stack).fit(X_tr_z, y_tr_np)
     proba_before = raw_stack.predict_proba(X_te_z)[:, 1]
     plot_calibration(y_te_np, proba_before, proba_te, out_png=OUT_PNG_CALIB)
 
-    # === prog decyzyjny z indeksu Youdena (wyznaczony na train) ===
     thr = youden_threshold(y_tr_np, proba_tr)
     y_pred = (proba_te >= thr).astype(int)
     print(f"Prog Youdena (z train): {thr:.4f}")
 
-    # === raport klasyfikacji ===
     print("\n=== classification_report (test) ===")
     print(classification_report(y_te_np, y_pred, target_names=le.classes_, digits=3))
     print("Macierz pomylek [[TN FP] [FN TP]]:")
@@ -320,7 +295,6 @@ def main():
     print("\n=== show_report (metadane probek FN/FP) ===")
     show_report(y_pred, y_test, ds, le)
 
-    # === niekwadratowa macierz pomylek: 3 klasy prawdziwe x 2 przewidziane ===
     confusion_3x2(y_pred, y_test.index, ds, le, out_png=OUT_PNG_CM_3x2)
 
 

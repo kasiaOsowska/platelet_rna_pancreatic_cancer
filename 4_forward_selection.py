@@ -1,15 +1,12 @@
-"""
-Greedy forward selection na stabilnych genach (wynik bootstrap_enet.py).
+"""Greedy forward selection of the final gene panel from the stable gene pool.
 
-Zamiast dodawac geny w sztywnym rankingu (freq * mean_abs_coef, jak KROK 4
-w bootstrap_enet.py), na kazdym kroku dokladamy ten gen z puli kandydatow,
-ktory NAJBARDZIEJ podnosi AUC na zbiorze treningowym (CV AUC, stratyfikowane
-foldy). Powtarzamy az do TOP_K_FINAL genow.
-
-Pula kandydatow = geny z stability_all_stable_genes.csv.
-Split, kodowanie etykiet i skalowanie - identyczne jak w bootstrap_enet.py,
-wiec X_tr_z dla podzbioru genow jest dokladnie taki sam (StandardScaler
-dziala per-kolumna).
+Methodology: reuses the split, label encoding and per-column standardization of
+3_stable_enet_selection.py, so the training matrix is identical. Candidates are the
+genes that passed stability selection. At each step the gene whose addition maximizes
+the mean cross-validated AUC of a logistic regression on the training set is appended
+to the panel; folds come from the dataset's multi-criteria stratified k-fold and are
+computed once so the steps stay comparable. Holdout test AUC is reported alongside but
+never used for selection. The procedure stops at TOP_K_FINAL genes.
 """
 
 import warnings
@@ -37,23 +34,19 @@ from utilz.constans import DISEASE, HEALTHY
 meta_path = r"../data/samples_pancreatic.xlsx"
 data_path = r"../data/counts_pancreatic.csv"
 
-# split (musi byc taki sam jak w bootstrap_enet.py, zeby trafic w ten sam train)
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
 BASE_SEED  = 2137
 
-# forward selection
 STABLE_GENES_CSV = "3_stable_enet_selection/stability_all_stable_genes.csv"
-TOP_K_FINAL      = 12      # ile genow dobrac
-SELECT_CV_FOLDS  = 10      # foldy do oceny kandydata (capowane min. liczebnoscia klasy)
+TOP_K_FINAL      = 12
+SELECT_CV_FOLDS  = 10
 
 OUT_CSV_PATH = f"{OUT_DIR}/forward_selection_genes.csv"
 OUT_PNG_PATH = f"{OUT_DIR}/forward_selection_auc.png"
 
 
 def cv_auc_train(X, y, idx, folds, seed=BASE_SEED):
-    """Sredni CV AUC na zbiorze treningowym dla kolumn `idx`.
-    `folds` to lista par (train_idx, test_idx) z ds.get_stratified_kfold."""
     aucs = []
     Xi = X[:, idx]
     for tr, va in folds:
@@ -65,7 +58,6 @@ def cv_auc_train(X, y, idx, folds, seed=BASE_SEED):
 
 
 def test_auc(X_tr, y_tr, X_te, y_te, idx, seed=BASE_SEED):
-    """Holdout test AUC: model uczony na calym train, oceniany na test."""
     mdl = LogisticRegression(
         max_iter=20000, class_weight='balanced', random_state=seed,
     ).fit(X_tr[:, idx], y_tr)
@@ -75,7 +67,6 @@ def test_auc(X_tr, y_tr, X_te, y_te, idx, seed=BASE_SEED):
 def forward_select(X_tr, y_tr, candidate_idx, gene_names, k_max,
                    folds, seed=BASE_SEED,
                    X_te=None, y_te=None):
-    """Chciwy dobor: na kazdym kroku dokladamy gen maks. CV AUC na train."""
     selected = []
     remaining = list(candidate_idx)
     rows = []
@@ -110,7 +101,6 @@ def forward_select(X_tr, y_tr, candidate_idx, gene_names, k_max,
 
 
 def main():
-    # --- dane + split (identyczny z bootstrap_enet.py) ---
     ds = load_dataset(data_path, meta_path, label_col="Group")
     ds.y = ds.y.replace({DISEASE: HEALTHY})
     y_enc = pd.Series(LabelEncoder().fit_transform(ds.y), index=ds.y.index)
@@ -124,7 +114,6 @@ def main():
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
-    # --- pula kandydatow = stabilne geny ---
     stable_df = pd.read_csv(STABLE_GENES_CSV)
     stable_genes = stable_df['gene'].tolist()
     genes = [g for g in stable_genes if g in X_tr_raw.columns]
@@ -133,7 +122,6 @@ def main():
         print(f"[!] {len(missing)} stabilnych genow nie ma w danych (pomijam): {missing}")
     print(f"[forward] pula kandydatow: {len(genes)} genow  -> dobieram {TOP_K_FINAL}")
 
-    # --- skalowanie (per-kolumna, jak w bootstrap_enet.py) ---
     X_tr_df = X_tr_raw[genes]
     X_te_df = X_te_raw[genes]
     scaler = StandardScaler().fit(X_tr_df.values)
@@ -142,10 +130,8 @@ def main():
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
-    # --- greedy forward selection ---
     print(f"\n=== forward selection (CV AUC na train, {SELECT_CV_FOLDS}-fold) ===")
     candidate_idx = list(range(len(genes)))
-    # foldy z wlasnej, wielokryterialnej stratyfikacji (ds.get_stratified_kfold), liczone raz
     folds = ds.get_stratified_kfold(X_tr_df, y_train, n_splits=SELECT_CV_FOLDS, random_state=BASE_SEED)
     selected_idx, fs_df = forward_select(
         X_tr_z, y_tr_np, candidate_idx, genes, k_max=TOP_K_FINAL,
@@ -156,12 +142,10 @@ def main():
     print(f"\nWybrane {len(selected_genes)} genow (kolejnosc doboru):")
     print(selected_genes)
 
-    # --- zapis CSV ---
     fs_df['rank'] = np.arange(1, len(fs_df) + 1)
     fs_df.to_csv(OUT_CSV_PATH, index=False)
     print(f"\n[OK] kolejnosc + AUC -> {OUT_CSV_PATH}")
 
-    # --- wykres ---
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.errorbar(fs_df['step'], fs_df['auc_mean'], yerr=fs_df['auc_std'],
                 marker='o', capsize=3,

@@ -1,14 +1,17 @@
-"""
-3. Stability-based gene selection (Elastic Net + bootstrap, PLA2Sig-style).
+"""Stability-based gene panel selection for platelet RNA pancreatic cancer classification.
 
-Schemat (wzorowany na 4_pla2sig_gene_selection.py):
-  KROK 1: DEG (log2FC + Mann-Whitney + multi-covariate residual bootstrap)
-  KROK 2: Tuning hiperparametrow ENet (C, l1_ratio) - GridSearchCV na train
-  KROK 3: Bootstrap stability - N_ITER iteracji ENet (tuned params) na
-          losowych podprobkach train; gen przechodzi jesli wybrany w
-          >= STABILITY_THRESHOLD iteracji
-  KROK 4: Inkrementalne top-k CV AUC + holdout test AUC -> wybor k*
-  KROK 5: Final GLM (binomial) na k* genach + zapis do CSV
+Methodology: samples are split into train/test/validation with multi-criteria
+stratification (label, stage, sex, age group); the validation part is merged back into
+the holdout test set. Differential expression filtering on the training set removes
+constant genes, keeps genes passing an ANOVA FDR test and a minimum mean expression,
+and regresses out technical/clinical covariates (age, sex, log10 library size) via
+multi-covariate residual bootstrap. Elastic-net logistic regression hyperparameters
+(C, l1_ratio) are tuned by randomized search with stratified CV. Stability selection
+(Meinshausen-Buhlmann) then refits the tuned elastic net on N_ITER stratified
+subsamples of the training set and keeps genes with a non-zero coefficient in at least
+STABILITY_THRESHOLD of the iterations, ranked by selection frequency times mean
+absolute coefficient. Incremental top-k evaluation reports CV AUC and holdout AUC for
+growing panels, and an unpenalized binomial GLM is fitted on the final panel.
 """
 
 import warnings
@@ -44,7 +47,6 @@ from utilz.preprocessing_utilz import (
 meta_path = r"../data/samples_pancreatic.xlsx"
 data_path = r"../data/counts_pancreatic.csv"
 
-# split / DEG
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
 BASE_SEED           = 2137
@@ -53,19 +55,16 @@ DEG_PVAL            = 0.05
 ANOVA_FDR_THRESHOLD = 0.05
 MEAN_THRESHOLD = 5
 
-# tuning ENet (random search)
 TUNE_CV_FOLDS       = 50
 TUNE_N_ITER         = 30
 TUNE_C_DIST         = loguniform(1e-2, 5)
 TUNE_L1_DIST        = uniform(loc=0.4, scale=0.6)
 
-# bootstrap stability
 N_ITER              = 100
-INNER_SUBSAMPLE     = 0.6       # frakcja train uzyta w kazdej iteracji
-STABILITY_THRESHOLD = 0.8       # gen niezerowy w >= 80% iteracji
+INNER_SUBSAMPLE     = 0.6
+STABILITY_THRESHOLD = 0.8
 
-# incremental top-k
-TOP_K_FINAL         = 12   # ile genów zapisac (sztywne, bez plateau)
+TOP_K_FINAL         = 12
 INCR_CV_FOLDS       = 50
 
 N_JOBS              = -1
@@ -77,9 +76,6 @@ OUT_CSV_STATS       = f"{OUT_DIR}/stability_summary.csv"
 OUT_CSV_STABLE      = f"{OUT_DIR}/stability_all_stable_genes.csv"
 
 
-# ---------------------------------------------------------------------------
-# KROK 2: tuning
-# ---------------------------------------------------------------------------
 def tune_enet(X, y, seed=BASE_SEED):
     n_folds = min(TUNE_CV_FOLDS, int(np.bincount(y.astype(int)).min()))
     cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
@@ -101,15 +97,9 @@ def tune_enet(X, y, seed=BASE_SEED):
     return rs.best_params_['C'], rs.best_params_['l1_ratio']
 
 
-# ---------------------------------------------------------------------------
-# KROK 3: bootstrap stability
-# ---------------------------------------------------------------------------
 def bootstrap_stability(X, y, enet_C, enet_l1_ratio,
                         n_iter=N_ITER, subsample=INNER_SUBSAMPLE,
                         seed=BASE_SEED):
-    """Subsample-based stability selection (Meinshausen-Buhlmann 2010).
-    Stratyfikowane podprobki bez zwracania.
-    """
     rng = np.random.default_rng(seed)
     p = X.shape[1]
     selected_count = np.zeros(p, dtype=int)
@@ -156,9 +146,6 @@ def bootstrap_stability(X, y, enet_C, enet_l1_ratio,
     return freq, mean_abs_coef, mean_signed_coef
 
 
-# ---------------------------------------------------------------------------
-# KROK 4: incremental top-k (taki sam jak w 4_pla2sig)
-# ---------------------------------------------------------------------------
 def incremental_topk_eval(X, y, ranked_idx, k_max=TOP_K_FINAL,
                           n_folds=INCR_CV_FOLDS, seed=BASE_SEED,
                           X_test=None, y_test=None):
@@ -191,9 +178,6 @@ def incremental_topk_eval(X, y, ranked_idx, k_max=TOP_K_FINAL,
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     ds = load_dataset(data_path, meta_path, label_col="Group")
     ds.y = ds.y.replace({DISEASE: HEALTHY})
@@ -203,13 +187,11 @@ def main():
         ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
         random_state=BASE_SEED,
     )
-    # walidacyjny niepotrzebny -> doklejamy do test setu (split deterministyczny)
     X_te_raw = pd.concat([X_te_raw, X_va_raw])
     y_test   = pd.concat([y_test, y_valid])
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
-    # --- KROK 1: DEG (identyczny jak w 4_pla2sig) ---
     print("\n=== KROK 1: DEG ===")
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
@@ -231,13 +213,11 @@ def main():
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
-    # --- KROK 2: tuning hiperparametrow ENet ---
     print("\n=== KROK 2: tuning ENet ===")
     print(f"[tune] random search: n_iter={TUNE_N_ITER}, "
           f"C~loguniform[0.01,0.2], l1_ratio~uniform[0.4,0.9]")
     enet_C, enet_l1 = tune_enet(X_tr_z, y_tr_np, seed=BASE_SEED)
 
-    # --- KROK 3: bootstrap stability ---
     print(f"\n=== KROK 3: bootstrap stability "
           f"(N_ITER={N_ITER}, subsample={INNER_SUBSAMPLE:.0%}, "
           f"threshold={STABILITY_THRESHOLD:.0%}) ===")
@@ -260,7 +240,6 @@ def main():
     print(stable_df.head(20).to_string())
 
 
-    # --- statystyki stabilnosci (zapis do CSV) ---
     thresholds = [0.5, 0.7, 0.8, 0.9, 1.0]
     thr_counts = pd.DataFrame({
         'prog_freq': thresholds,
@@ -290,7 +269,6 @@ def main():
     print(f"  down (ujemny wspolczynnik): {n_down}")
     print(f"[OK] statystyki -> {OUT_CSV_THR}, {OUT_CSV_STATS}, {OUT_CSV_STABLE}")
 
-    # --- KROK 4: incremental top-k ---
     print("\n=== KROK 4: top-k ===")
     g2c = {g: i for i, g in enumerate(deg_genes)}
     ranked_idx = [g2c[g] for g in stable_df['gene'].tolist()]
@@ -318,7 +296,6 @@ def main():
     plt.savefig(OUT_PNG_INCR, dpi=140)
     plt.show()
 
-    # --- KROK 5: final GLM + zapis ---
     print("\n=== KROK 5: GLM ===")
     idx_min = [g2c[g] for g in minimal_genes]
     glm = LogisticRegression(

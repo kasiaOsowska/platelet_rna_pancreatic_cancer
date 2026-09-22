@@ -1,3 +1,17 @@
+"""Scikit-learn transformers for gene-level filtering before model fitting.
+
+Each transformer learns the set of retained genes on the training data only and
+subsets the columns at transform time. ConstantExpressionReductor drops genes with a
+single unique value. MeanExpressionReductor keeps genes whose mean expression exceeds a
+given percentile of the mean expression distribution. Log2FCReductor keeps genes whose
+absolute log2 fold change between the two classes exceeds a threshold.
+MannWhitneyReductor keeps genes with a two-sided Mann-Whitney U p-value below alpha
+(p < 0.05 in PLA2Sig). AnovaFdrReductor keeps genes whose ANOVA F-test p-value survives
+Benjamini-Hochberg FDR correction. WithinGroupVarianceReductor pools the within-class
+variance of each gene, compares it against the median gene variance with a chi-square
+test and keeps genes whose FDR-corrected p-value is at most alpha.
+"""
+
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -13,7 +27,6 @@ class AnovaFdrReductor(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         F, p = f_classif(X, y)
-        # Benjamini-Hochberg FDR correction
         _, p_corrected, _, _ = multipletests(p, alpha=self.alpha, method='fdr_bh')
         self.selected_genes_ = X.columns[p_corrected < self.alpha]
         return self
@@ -25,7 +38,6 @@ class AnovaFdrReductor(BaseEstimator, TransformerMixin):
 
     def get_feature_names_out(self, input_features=None):
         return np.asarray(self.selected_genes_, dtype=object)
-
 
 
 class MeanExpressionReductor(BaseEstimator, TransformerMixin):
@@ -93,12 +105,7 @@ class Log2FCReductor(BaseEstimator, TransformerMixin):
         return np.asarray(self.selected_genes_, dtype=object)
 
 
-
 class MannWhitneyReductor(BaseEstimator, TransformerMixin):
-    """
-    Filtr genow po p-value testu Manna-Whitneya U.
-    PLA2Sig: p < 0.05.
-    """
 
     def __init__(self, alpha=0.05):
         self.alpha = alpha
@@ -120,7 +127,6 @@ class MannWhitneyReductor(BaseEstimator, TransformerMixin):
 
     def get_feature_names_out(self, input_features=None):
         return np.asarray(self.selected_genes_, dtype=object)
-
 
 
 class WithinGroupVarianceReductor(BaseEstimator, TransformerMixin):

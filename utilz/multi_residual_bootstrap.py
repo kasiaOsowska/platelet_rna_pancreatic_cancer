@@ -1,3 +1,17 @@
+"""Removal of covariate-driven expression variation by multi-covariate residual bootstrap.
+
+Methodology: covariates are age, sex and log10 library size. For every gene an OLS
+model of expression on the covariates is fitted and its R^2 tested with an F test;
+p-values are corrected by Benjamini-Hochberg FDR. Genes that pass the FDR test are
+re-fitted on n_bootstrap resamples of the samples, and only genes whose bootstrap
+R^2 distribution has a median of at least min_r2 and a coefficient of variation below
+cv_threshold_pct are accepted as stably covariate-dependent. The transformer fits the
+OLS coefficients on control samples only (labels == 0) to avoid removing
+disease-related signal, and at transform time subtracts the predicted covariate
+contribution from the accepted genes, leaving the other genes untouched. Samples with
+missing covariates are left uncorrected.
+"""
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -10,7 +24,7 @@ def _ols_r2(X_cov, Y):
     n = Y.shape[0]
     Xc = X_cov - X_cov.mean(axis=0)
     XtX = Xc.T @ Xc
-    XtY = Xc.T @ Y                       # = Xc.T @ Yc, bo Xc wycentrowane
+    XtY = Xc.T @ Y
     try:
         beta = np.linalg.solve(XtX, XtY)
     except np.linalg.LinAlgError:

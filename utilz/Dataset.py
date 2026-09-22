@@ -1,3 +1,17 @@
+"""Dataset loading and leakage-free, multi-criteria stratified splitting.
+
+load_dataset reads the count matrix and the sample metadata, keeps only samples present
+in both, and drops samples whose group label contradicts their tumour stage. The
+Dataset class builds strata by combining the class label, tumour stage (I and II
+merged, missing coded as none), sex and an age tertile; strata with fewer than two
+samples cannot be stratified and their samples are always assigned to the training set.
+get_train_test_valid_split performs a stratified train/rest split followed by a
+stratified test/validation split and asserts that no sample index occurs in more than
+one split. get_stratified_kfold returns fold index pairs stratified on the same
+composite strata, with the non-stratifiable remainder added to the training part of
+every fold.
+"""
+
 import os
 
 import numpy as np
@@ -132,7 +146,6 @@ def load_dataset(path_csv, path_xlsx, label_col=None, separate_stage_iv = False)
     if separate_stage_iv:
         y = y.mask((y == CANCER) & (meta["Stage"] == "IV"), "cancer_IV")
 
-    # drop inconsistent sample Vumc-ChronPan-29-TR1045 with disease=HEALTHY but stage IV
     mask = ((y == HEALTHY) | (y == DISEASE)) & (meta["Stage"] == "IV")
     print("Dropping inconsistent sample:")
     print(meta.loc[mask])
