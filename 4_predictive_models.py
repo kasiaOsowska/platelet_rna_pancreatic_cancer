@@ -1,16 +1,36 @@
-"""Comparison of alternative classifiers on the selected gene panel.
+"""Comparison of classifiers on the selected gene panel.
 
-Methodology: loads the panel produced by forward selection and reuses the same
-train/test split and covariate correction (multi-covariate residual bootstrap on
-age, sex and log10 library size, applied to all panel genes) followed by
-standardization. Four models are compared: elastic-net logistic regression, XGBoost,
-RBF SVM - each tuned by grid search over multi-criteria stratified folds on the
-training set - and a stacking ensemble of the three tuned models with a logistic
-regression meta-learner (stacking falls back to plain StratifiedKFold because
-cross_val_predict requires a partition). Evaluation on the holdout test set: AUC bar
-plot, ROC curves, 2x2 confusion matrices at the Youden threshold determined on the
-training set, and 3x2 confusion matrices that keep the original three groups as true
-labels to show how patients with benign pancreatic disease are classified.
+Methodology:
+
+1. Gene panel. The genes selected by 3_forward_selection.py are read from GENES_CSV.
+
+2. Dataset split. The same multi-criteria stratified train/test/validation split as
+   in the other scripts; the validation set is concatenated with the test set into a
+   single holdout set.
+
+3. Covariate correction. Age, sex and log10 library size are regressed out of the
+   panel genes by OLS fitted on training controls (CovariateResidualizer); only genes
+   whose covariate dependence is large enough (median bootstrap R^2) and
+   bootstrap-stable are corrected.
+
+4. Standardization of every gene to zero mean and unit variance on the training set.
+
+5. Base models. Elastic-net logistic regression, RBF SVM and XGBoost (with
+   scale_pos_weight set to the class ratio) are tuned by grid search for ROC AUC over
+   GRID_CV_FOLDS multi-criteria stratified folds of the training set and refitted on
+   the whole training set.
+
+6. Stacking. The three tuned models are combined with a logistic regression
+   meta-learner. Its folds are a plain StratifiedKFold, because cross_val_predict
+   inside the stack requires a partition; CV AUC is estimated with cross_val_score.
+
+7. Decision threshold. For every model the Youden-optimal threshold is computed from
+   its predictions on the training set.
+
+8. Evaluation on the holdout set: AUC bar plot, ROC curves, 2x2 confusion matrices
+   with sensitivity, specificity and accuracy at the Youden threshold, and 3x2
+   confusion matrices that keep the original three groups as true labels to show how
+   patients with non-cancerous pancreatic disease are classified.
 """
 
 import warnings
@@ -43,12 +63,12 @@ from utilz.preprocessing_utilz import (
     ConstantExpressionReductor, Log2FCReductor, MannWhitneyReductor,
 )
 from utilz.multi_residual_bootstrap import (
-    MultiCovariateResidualBootstrapTransformer, build_covariates,
+    CovariateResidualizer, build_covariates,
 )
 
 meta_path        = r"../data/samples_pancreatic.xlsx"
 data_path        = r"../data/counts_pancreatic.csv"
-GENES_CSV        = "4_forward_selection/forward_selection_genes.csv"
+GENES_CSV        = "3_forward_selection/forward_selection_genes.csv"
 
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
@@ -64,10 +84,10 @@ OUT_CSV_CM        = f"{OUT_DIR}/alt_models_confusion.csv"
 OUT_PNG_CM_3x2    = f"{OUT_DIR}/alt_models_confusion_3x2.png"
 OUT_CSV_CM_3x2    = f"{OUT_DIR}/alt_models_confusion_3x2.csv"
 
-PL_LABELS = {
-    HEALTHY: "zdrowe",
-    DISEASE: "choroby trzustki",
-    CANCER:  "nowotwór trzustki",
+GROUP_LABELS = {
+    HEALTHY: "healthy",
+    DISEASE: "pancreatic diseases",
+    CANCER:  "pancreatic cancer",
 }
 
 
@@ -85,22 +105,6 @@ def get_model_grids(seed):
                 'l1_ratio': [0, 0.1, 0.3, 0.5, 0.7, 0.9],
             },
         },
-        'xgboost': {
-            'estimator': XGBClassifier(
-                objective='binary:logistic', eval_metric='logloss',
-                tree_method='hist', random_state=seed, n_jobs=1,
-                verbosity=0,
-            ),
-            'param_grid': {
-                'n_estimators':     [50, 100, 200, 400],
-                'max_depth':        [1, 2, 3, 6],
-                'learning_rate':    [0.01, 0.03, 0.1, 0.2, 0.3],
-                'min_child_weight': [1, 5, 10, 20, 50],
-                'reg_lambda':       [0.5, 1.0, 2.0],
-                'subsample':        [0.8, 1.0],
-                'colsample_bytree': [0.8, 1.0],
-            },
-        },
         'svm_rbf': {
             'estimator': SVC(
                 kernel='rbf', probability=True, class_weight='balanced',
@@ -109,6 +113,22 @@ def get_model_grids(seed):
             'param_grid': {
                 'C':     [0.1, 1.0, 10.0, 100.0, 200],
                 'gamma': ['scale', 0.001, 0.01, 0.1],
+            },
+        },
+        'xgboost': {
+            'estimator': XGBClassifier(
+                objective='binary:logistic', eval_metric='logloss',
+                tree_method='hist', random_state=seed, n_jobs=1,
+                verbosity=0,
+            ),
+            'param_grid': {
+                'n_estimators': [50, 100],
+                'max_depth': [ 2, 3],
+                'learning_rate': [0.03, 0.1, 0.2],
+                'min_child_weight': [1, 5, 10],
+                'reg_lambda': [0.5, 1.0, 2.0],
+                'subsample': [0.8],
+                'colsample_bytree': [0.8],
             },
         },
     }
@@ -198,7 +218,7 @@ def confusion_3x2_single(y_pred, y_index, ds, le):
     true_group = ds.meta.loc[y_index, 'Group']
     pred_label = pd.Series(
         np.where(np.asarray(y_pred) == 1, le.classes_[1], le.classes_[0]),
-        index=y_index, name='przewidziana',
+        index=y_index, name='predicted',
     )
     row_order = [HEALTHY, DISEASE, CANCER]
     col_order = [le.classes_[0], le.classes_[1]]
@@ -209,11 +229,11 @@ def confusion_3x2_single(y_pred, y_index, ds, le):
 def main():
     if not os.path.exists(GENES_CSV):
         raise FileNotFoundError(
-            f"Brak {GENES_CSV} - uruchom najpierw 4_pla2sig_gene_selection.py"
+            f"Missing {GENES_CSV} - run forward selection first"
         )
     genes_df = pd.read_csv(GENES_CSV)
     selected_genes = genes_df.loc[genes_df['gene'] != '__intercept__', 'gene'].tolist()
-    print(f"[INFO] wczytano {len(selected_genes)} genow z {GENES_CSV}")
+    print(f"[INFO] loaded {len(selected_genes)} genes from {GENES_CSV}")
 
     ds = load_dataset(data_path, meta_path, label_col="Group")
     ds.y = ds.y.replace({DISEASE: HEALTHY})
@@ -230,7 +250,7 @@ def main():
 
     missing = [g for g in selected_genes if g not in X_tr_raw.columns]
     if missing:
-        raise ValueError(f"Geny z CSV nie sa dostepne w danych: {missing[:5]}...")
+        raise ValueError(f"Genes from CSV are not available in the data: {missing[:5]}...")
     X_tr_raw = X_tr_raw[selected_genes]
     X_te_raw = X_te_raw[selected_genes]
 
@@ -238,20 +258,17 @@ def main():
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
 
-    print("\n=== korekcja na 12 genach panelu ===")
+    print("\n=== covariate correction on panel genes ===")
     cov = build_covariates(ds.meta)
     deg_pipe = Pipeline([
-        ('multi_resid', MultiCovariateResidualBootstrapTransformer(
+        ('multi_resid', CovariateResidualizer(
             covariates=cov, labels=y_train,
-            n_bootstrap=2, fdr_alpha=1, min_r2=0, cv_threshold_pct=1e9,
+            n_bootstrap=1000, min_r2=0.05, cv_threshold_pct=30.0,
         )),
+        ('scaler', StandardScaler()),
     ])
-    X_tr_deg_df = deg_pipe.fit_transform(X_tr_raw, y_train)
-    X_te_deg_df = deg_pipe.transform(X_te_raw)
-
-    scaler = StandardScaler().fit(X_tr_deg_df.values)
-    X_tr_z = scaler.transform(X_tr_deg_df.values)
-    X_te_z = scaler.transform(X_te_deg_df.values)
+    X_tr_z = deg_pipe.fit_transform(X_tr_raw, y_train)
+    X_te_z = deg_pipe.transform(X_te_raw)
     y_tr_np = y_train.values
     y_te_np = y_test.values
 
@@ -273,10 +290,15 @@ def main():
     ))
 
     summary = pd.DataFrame([{k: v for k, v in r.items()
-                             if k not in ('proba_te', 'estimator')}
+                             if k not in ('proba_tr', 'proba_te', 'estimator')}
                             for r in results])
-    print("\n=== PODSUMOWANIE ===")
-    print(summary.to_string(index=False))
+    print("\n=== SUMMARY ===")
+    summary_txt = summary.apply(
+        lambda col: col.map('{:.4f}'.format) if col.dtype.kind == 'f' else col.astype(str))
+    widths = {c: max(len(c), summary_txt[c].str.len().max()) for c in summary_txt.columns}
+    print("  ".join(c.ljust(widths[c]) for c in summary_txt.columns))
+    for _, row in summary_txt.iterrows():
+        print("  ".join(row[c].ljust(widths[c]) for c in summary_txt.columns))
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     x = np.arange(len(results))
@@ -290,7 +312,7 @@ def main():
     ax.set_xticks(x); ax.set_xticklabels(summary['model'])
     ax.set_ylim(0.5, 1.0)
     ax.set_ylabel('AUC')
-    ax.set_title(f'Modele na {len(selected_genes)} genach PLA2Sig')
+    ax.set_title(f'Models on the {len(selected_genes)}-gene panel')
     ax.legend(); ax.grid(alpha=0.3, axis='y')
     plt.tight_layout(); plt.savefig(OUT_PNG_BARS, dpi=140); plt.show()
     print(f"[OK] bar plot -> {OUT_PNG_BARS}")
@@ -305,7 +327,7 @@ def main():
     plt.tight_layout(); plt.savefig(OUT_PNG_ROC, dpi=140); plt.show()
     print(f"[OK] ROC plot  -> {OUT_PNG_ROC}")
 
-    print("\n=== MACIERZE POMYLEK (prog Youdena wyznaczony na train) ===")
+    print("\n=== CONFUSION MATRICES (Youden threshold from train) ===")
     n = len(results)
     fig, axes = plt.subplots(1, n, figsize=(4 * n, 4))
     if n == 1:
@@ -320,23 +342,23 @@ def main():
         spec = tn / max(tn + fp, 1)
         acc  = (tp + tn) / cm.sum()
         cm_rows.append({
-            'model': r['model'], 'prog_youden': round(thr, 4),
+            'model': r['model'], 'youden_threshold': round(thr, 4),
             'TN': int(tn), 'FP': int(fp), 'FN': int(fn), 'TP': int(tp),
-            'czulosc': round(float(sens), 4),
-            'swoistosc': round(float(spec), 4),
-            'dokladnosc': round(float(acc), 4),
+            'sensitivity': round(float(sens), 4),
+            'specificity': round(float(spec), 4),
+            'accuracy': round(float(acc), 4),
         })
-        print(f"  {r['model']:<20} prog={thr:.4f}  TN={tn} FP={fp} FN={fn} TP={tp}  "
-              f"czulosc={sens:.3f} swoistosc={spec:.3f} dokladnosc={acc:.3f}")
-        ConfusionMatrixDisplay(cm, display_labels=['kontrola', 'nowotwor']).plot(
+        print(f"  {r['model']:<20} threshold={thr:.4f}  TN={tn} FP={fp} FN={fn} TP={tp}  "
+              f"sensitivity={sens:.3f} specificity={spec:.3f} accuracy={acc:.3f}")
+        ConfusionMatrixDisplay(cm, display_labels=['control', 'cancer']).plot(
             ax=ax, colorbar=False, cmap='Blues')
-        ax.set_title(f"{r['model']}\nprog={thr:.2f}")
+        ax.set_title(f"{r['model']}\nthreshold={thr:.2f}")
     plt.tight_layout(); plt.savefig(OUT_PNG_CM, dpi=140); plt.show()
     pd.DataFrame(cm_rows).to_csv(OUT_CSV_CM, index=False)
     print(f"[OK] confusion matrices -> {OUT_PNG_CM}")
     print(f"[OK] confusion summary  -> {OUT_CSV_CM}")
 
-    print("\n=== MACIERZE POMYLEK 3x2 (3 klasy prawdziwe x 2 przewidziane) ===")
+    print("\n=== 3x2 CONFUSION MATRICES (3 true groups x 2 predicted classes) ===")
     n = len(results)
     ncols = 2
     nrows = int(np.ceil(n / ncols))
@@ -348,39 +370,39 @@ def main():
         y_pred = (r['proba_te'] >= thr).astype(int)
         cm = confusion_3x2_single(y_pred, y_test.index, ds, le)
 
-        print(f"\n--- {r['model']} (prog={thr:.4f}) ---")
+        print(f"\n--- {r['model']} (threshold={thr:.4f}) ---")
         print(cm.to_string())
         for grp in cm.index:
             cm3_rows.append({
-                'model': r['model'], 'prog_youden': round(thr, 4),
-                'prawdziwa_grupa': grp,
+                'model': r['model'], 'youden_threshold': round(thr, 4),
+                'true_group': grp,
                 f'pred_{cm.columns[0]}': int(cm.loc[grp, cm.columns[0]]),
                 f'pred_{cm.columns[1]}': int(cm.loc[grp, cm.columns[1]]),
             })
 
         ax.imshow(cm.values, cmap='Blues')
         ax.set_xticks(range(cm.shape[1]))
-        ax.set_xticklabels([PL_LABELS.get(c, c) for c in cm.columns],
+        ax.set_xticklabels([GROUP_LABELS.get(c, c) for c in cm.columns],
                            rotation=15, ha='right')
         ax.set_yticks(range(cm.shape[0]))
-        ax.set_yticklabels([PL_LABELS.get(r_, r_) for r_ in cm.index])
+        ax.set_yticklabels([GROUP_LABELS.get(r_, r_) for r_ in cm.index])
         vmax = cm.values.max()
         for i in range(cm.shape[0]):
             for j in range(cm.shape[1]):
                 v = int(cm.values[i, j])
                 ax.text(j, i, v, ha='center', va='center',
                         color='white' if v > vmax / 2 else 'black')
-        ax.set_xlabel('Klasa przewidziana')
-        ax.set_ylabel('Klasa prawdziwa')
-        ax.set_title(f"{r['model']}\nprog={thr:.2f}")
+        ax.set_xlabel('Predicted class')
+        ax.set_ylabel('True group')
+        ax.set_title(f"{r['model']}\nthreshold={thr:.2f}")
 
     for ax in axes[n:]:
         ax.axis('off')
 
     plt.tight_layout(h_pad=3.0); plt.savefig(OUT_PNG_CM_3x2, dpi=140); plt.show()
     pd.DataFrame(cm3_rows).to_csv(OUT_CSV_CM_3x2, index=False)
-    print(f"[OK] macierze 3x2     -> {OUT_PNG_CM_3x2}")
-    print(f"[OK] podsumowanie 3x2 -> {OUT_CSV_CM_3x2}")
+    print(f"[OK] 3x2 matrices     -> {OUT_PNG_CM_3x2}")
+    print(f"[OK] 3x2 summary      -> {OUT_CSV_CM_3x2}")
 
 
 if __name__ == '__main__':

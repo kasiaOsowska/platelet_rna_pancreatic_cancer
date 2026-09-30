@@ -14,7 +14,7 @@ is fitted on the saved panel.
 import warnings;
 from pathlib import Path
 
-from utilz.multi_residual_bootstrap import MultiCovariateResidualBootstrapTransformer, build_covariates
+from utilz.multi_residual_bootstrap import CovariateResidualizer, build_covariates
 
 warnings.filterwarnings('ignore')
 
@@ -129,32 +129,30 @@ def main():
     print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
     print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
-    print("\n=== KROK 1: DEG ===")
+    print("\n=== STEP 1: DEG ===")
     deg_pipe = Pipeline([
         ('const',  ConstantExpressionReductor()),
         ('log2fc', Log2FCReductor(min_abs_log2fc=LOG2FC_THRESHOLD)),
         ('pval',   MannWhitneyReductor(alpha=DEG_PVAL)),
+        ('scaler', StandardScaler()),
     ])
-    X_tr_deg_df = deg_pipe.fit_transform(X_tr_raw, y_train)
-    X_te_deg_df = deg_pipe.transform(X_te_raw)
-    deg_genes = list(X_tr_deg_df.columns)
+    X_tr_z = deg_pipe.fit_transform(X_tr_raw, y_train)
+    X_te_z = deg_pipe.transform(X_te_raw)
+    deg_genes = list(deg_pipe.get_feature_names_out())
 
-    print("\n=== KROK 2: LASSO ===")
-    scaler = StandardScaler().fit(X_tr_deg_df.values)
-    X_tr_z = scaler.transform(X_tr_deg_df.values)
-    X_te_z = scaler.transform(X_te_deg_df.values)
+    print("\n=== STEP 2: LASSO ===")
     coefs = lasso_cv_lambda_1se(X_tr_z, y_train.values)
-    print(f"[LASSO] niezerowe wsp.: {(coefs != 0).sum()} / {len(coefs)}")
+    print(f"[LASSO] non-zero coef.: {(coefs != 0).sum()} / {len(coefs)}")
 
     rank_df = (pd.DataFrame({'gene': deg_genes, 'coef': coefs})
                .assign(abs_coef=lambda d: d['coef'].abs())
                .query('coef != 0')
                .sort_values('abs_coef', ascending=False)
                .reset_index(drop=True))
-    print("\nTop 20 wg |coef|:")
+    print("\nTop 20 by |coef|:")
     print(rank_df.head(20)[['gene', 'coef']].to_string())
 
-    print("\n=== KROK 3: top-k ===")
+    print("\n=== STEP 3: top-k ===")
     g2c = {g: i for i, g in enumerate(deg_genes)}
     ranked_idx = [g2c[g] for g in rank_df['gene'].tolist()]
     incr_df = incremental_topk_eval(
@@ -164,10 +162,10 @@ def main():
     k_star = pick_minimal_k(incr_df)
     selected_genes = rank_df['gene'].head(TOP_K_MAX).tolist()
     if len(selected_genes) < TOP_K_MAX:
-        print(f"[UWAGA] tylko {len(selected_genes)} genow z niezerowym wsp. LASSO "
+        print(f"[WARNING] only {len(selected_genes)} genes with non-zero LASSO coef. "
               f"(< TOP_K_MAX={TOP_K_MAX})")
-    print(f"\nk* (informacyjnie) = {k_star}; zapis TOP_K_MAX={TOP_K_MAX}; "
-          f"geny: {selected_genes}")
+    print(f"\nk* (for information) = {k_star}; saving TOP_K_MAX={TOP_K_MAX}; "
+          f"genes: {selected_genes}")
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.errorbar(incr_df['k'], incr_df['auc_mean'], yerr=incr_df['auc_std'],
@@ -181,7 +179,7 @@ def main():
     ax.legend(); ax.grid(alpha=0.3)
     plt.tight_layout(); plt.show()
 
-    print("\n=== KROK 4: GLM ===")
+    print("\n=== STEP 4: GLM ===")
     idx_sel = [g2c[g] for g in selected_genes]
     glm = LogisticRegression(
         penalty=None, solver='lbfgs', max_iter=20000,
@@ -218,7 +216,7 @@ def main():
         'n_test':       int(len(y_test)),
     })
     out_df.to_csv(out_path, index=False)
-    print(f"\n[OK] zapisano {len(selected_genes)} genow + intercept -> {out_path}")
+    print(f"\n[OK] saved {len(selected_genes)} genes + intercept -> {out_path}")
 
 
 if __name__ == '__main__':

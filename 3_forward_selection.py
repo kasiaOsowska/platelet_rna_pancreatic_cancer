@@ -1,7 +1,8 @@
 """Greedy forward selection of the final gene panel from the stable gene pool.
 
-Methodology: reuses the split, label encoding and per-column standardization of
-3_stable_enet_selection.py, so the training matrix is identical. Candidates are the
+Methodology: reuses the split and label encoding of 2_stable_selection_with_enet.py.
+The stable genes are taken from the raw (not covariate-corrected) matrix and
+standardized per column. Candidates are the
 genes that passed stability selection. At each step the gene whose addition maximizes
 the mean cross-validated AUC of a logistic regression on the training set is appended
 to the panel; folds come from the dataset's multi-criteria stratified k-fold and are
@@ -25,6 +26,7 @@ OUT_DIR = Path(__file__).stem
 Path(OUT_DIR).mkdir(exist_ok=True)
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
@@ -38,7 +40,7 @@ TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
 BASE_SEED  = 2137
 
-STABLE_GENES_CSV = "3_stable_enet_selection/stability_all_stable_genes.csv"
+STABLE_GENES_CSV = "2_stable_selection_with_enet/stability_all_stable_genes.csv"
 TOP_K_FINAL      = 12
 SELECT_CV_FOLDS  = 10
 
@@ -100,69 +102,68 @@ def forward_select(X_tr, y_tr, candidate_idx, gene_names, k_max,
     return selected, pd.DataFrame(rows)
 
 
-def main():
-    ds = load_dataset(data_path, meta_path, label_col="Group")
-    ds.y = ds.y.replace({DISEASE: HEALTHY})
-    y_enc = pd.Series(LabelEncoder().fit_transform(ds.y), index=ds.y.index)
+ds = load_dataset(data_path, meta_path, label_col="Group")
+ds.y = ds.y.replace({DISEASE: HEALTHY})
+y_enc = pd.Series(LabelEncoder().fit_transform(ds.y), index=ds.y.index)
 
-    X_tr_raw, X_te_raw, X_va_raw, y_train, y_test, y_valid = ds.get_train_test_valid_split(
-        ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
-        random_state=BASE_SEED,
-    )
-    X_te_raw = pd.concat([X_te_raw, X_va_raw])
-    y_test   = pd.concat([y_test, y_valid])
-    print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
-    print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
+X_tr_raw, X_te_raw, X_va_raw, y_train, y_test, y_valid = ds.get_train_test_valid_split(
+    ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
+    random_state=BASE_SEED,
+)
+X_te_raw = pd.concat([X_te_raw, X_va_raw])
+y_test   = pd.concat([y_test, y_valid])
+print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
+print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
-    stable_df = pd.read_csv(STABLE_GENES_CSV)
-    stable_genes = stable_df['gene'].tolist()
-    genes = [g for g in stable_genes if g in X_tr_raw.columns]
-    missing = [g for g in stable_genes if g not in X_tr_raw.columns]
-    if missing:
-        print(f"[!] {len(missing)} stabilnych genow nie ma w danych (pomijam): {missing}")
-    print(f"[forward] pula kandydatow: {len(genes)} genow  -> dobieram {TOP_K_FINAL}")
+stable_df = pd.read_csv(STABLE_GENES_CSV)
+stable_genes = stable_df['gene'].tolist()
+genes = [g for g in stable_genes if g in X_tr_raw.columns]
+missing = [g for g in stable_genes if g not in X_tr_raw.columns]
+if missing:
+    print(f"[!] {len(missing)} stable genes missing from the data (skipped): {missing}")
+print(f"[forward] candidate pool: {len(genes)} genes  -> selecting {TOP_K_FINAL}")
 
-    X_tr_df = X_tr_raw[genes]
-    X_te_df = X_te_raw[genes]
-    scaler = StandardScaler().fit(X_tr_df.values)
-    X_tr_z = scaler.transform(X_tr_df.values)
-    X_te_z = scaler.transform(X_te_df.values)
-    y_tr_np = y_train.values
-    y_te_np = y_test.values
+X_tr_df = X_tr_raw[genes]
+X_te_df = X_te_raw[genes]
+scale_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+])
+X_tr_z = scale_pipe.fit_transform(X_tr_df)
+X_te_z = scale_pipe.transform(X_te_df)
+y_tr_np = y_train.values
+y_te_np = y_test.values
 
-    print(f"\n=== forward selection (CV AUC na train, {SELECT_CV_FOLDS}-fold) ===")
-    candidate_idx = list(range(len(genes)))
-    folds = ds.get_stratified_kfold(X_tr_df, y_train, n_splits=SELECT_CV_FOLDS, random_state=BASE_SEED)
-    selected_idx, fs_df = forward_select(
-        X_tr_z, y_tr_np, candidate_idx, genes, k_max=TOP_K_FINAL,
-        folds=folds, seed=BASE_SEED,
-        X_te=X_te_z, y_te=y_te_np,
-    )
-    selected_genes = [genes[i] for i in selected_idx]
-    print(f"\nWybrane {len(selected_genes)} genow (kolejnosc doboru):")
-    print(selected_genes)
+print(f"\n=== forward selection (CV AUC on train, {SELECT_CV_FOLDS}-fold) ===")
+candidate_idx = list(range(len(genes)))
+folds = ds.get_stratified_kfold(X_tr_df, y_train, n_splits=SELECT_CV_FOLDS, random_state=BASE_SEED)
+selected_idx, fs_df = forward_select(
+    X_tr_z, y_tr_np, candidate_idx, genes, k_max=TOP_K_FINAL,
+    folds=folds, seed=BASE_SEED,
+    X_te=X_te_z, y_te=y_te_np,
+)
+selected_genes = [genes[i] for i in selected_idx]
+print(f"\nSelected {len(selected_genes)} genes (in order of selection):")
+print(selected_genes)
 
-    fs_df['rank'] = np.arange(1, len(fs_df) + 1)
-    fs_df.to_csv(OUT_CSV_PATH, index=False)
-    print(f"\n[OK] kolejnosc + AUC -> {OUT_CSV_PATH}")
+fs_df['rank'] = np.arange(1, len(fs_df) + 1)
+fs_df.to_csv(OUT_CSV_PATH, index=False)
+print(f"\n[OK] order + AUC -> {OUT_CSV_PATH}")
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.errorbar(fs_df['step'], fs_df['auc_mean'], yerr=fs_df['auc_std'],
-                marker='o', capsize=3,
-                label=f'CV AUC ({SELECT_CV_FOLDS}-fold, train)')
-    if 'auc_test' in fs_df.columns:
-        ax.plot(fs_df['step'], fs_df['auc_test'],
-                marker='s', linestyle='--', color='tab:green',
-                label='Holdout test AUC')
-    ax.set(xlabel='Liczba genow (forward selection)', ylabel='AUC',
-           title='Greedy forward selection na stabilnych genach')
-    ax.set_xticks(fs_df['step'])
-    ax.legend(); ax.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(OUT_PNG_PATH, dpi=140)
-    plt.show()
-    print(f"[OK] wykres            -> {OUT_PNG_PATH}")
+fig, ax = plt.subplots(figsize=(8, 4.5))
+ax.errorbar(fs_df['step'], fs_df['auc_mean'], yerr=fs_df['auc_std'],
+            marker='o', capsize=3,
+            label=f'CV AUC ({SELECT_CV_FOLDS}-fold, train)')
+if 'auc_test' in fs_df.columns:
+    ax.plot(fs_df['step'], fs_df['auc_test'],
+            marker='s', linestyle='--', color='tab:green',
+            label='Holdout test AUC')
+ax.set(xlabel='Liczba genow (forward selection)', ylabel='AUC',
+       title='Greedy forward selection na stabilnych genach')
+ax.set_xticks(fs_df['step'])
+ax.legend(); ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(OUT_PNG_PATH, dpi=140)
+plt.show()
+print(f"[OK] plot -> {OUT_PNG_PATH}")
 
 
-if __name__ == '__main__':
-    main()

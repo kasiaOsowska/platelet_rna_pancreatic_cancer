@@ -1,23 +1,41 @@
-"""Removal of covariate-driven expression variation by multi-covariate residual bootstrap.
+"""Removal of covariate-driven expression variation by covariate residualization (OLS).
 
-Methodology: covariates are age, sex and log10 library size. For every gene an OLS
-model of expression on the covariates is fitted and its R^2 tested with an F test;
-p-values are corrected by Benjamini-Hochberg FDR. Genes that pass the FDR test are
-re-fitted on n_bootstrap resamples of the samples, and only genes whose bootstrap
-R^2 distribution has a median of at least min_r2 and a coefficient of variation below
-cv_threshold_pct are accepted as stably covariate-dependent. The transformer fits the
-OLS coefficients on control samples only (labels == 0) to avoid removing
-disease-related signal, and at transform time subtracts the predicted covariate
-contribution from the accepted genes, leaving the other genes untouched. Samples with
-missing covariates are left uncorrected.
+Methodology:
+
+fit
+
+1. Covariates (build_covariates): age, sex (F = 0, M = 1, any other value becomes
+   missing) and log10 library size.
+
+2. Reference samples: control samples only (labels == 0), so that cancer-related
+   signal is not absorbed into the covariate model; samples with any missing
+   covariate are excluded. With labels=None all samples are used.
+
+3. Bootstrap stability. For every gene, an OLS model of expression on the
+   covariates (with intercept) is fitted on n_bootstrap resamples of the reference
+   samples drawn with replacement (the same resamples for every gene). A gene is
+   accepted as stably covariate-dependent if the median of its bootstrap R^2 is at
+   least min_r2 and the coefficient of variation of R^2 (std / median, in percent)
+   is below cv_threshold_pct. Each gene is judged on its own, so the result does not
+   depend on which other genes are passed to the transformer.
+
+4. Correction model. For the accepted genes a linear regression with intercept on
+   the covariates is fitted on the reference samples.
+
+transform
+
+5. Correction. For the accepted genes the predicted value (intercept plus covariate
+   effects) is subtracted from the expression, leaving residuals. All other genes
+   are returned unchanged.
+
+6. Missing covariates. Samples with any missing covariate are not corrected and keep
+   their raw values.
 """
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import LinearRegression
-from statsmodels.stats.multitest import multipletests
 
 
 def _ols_r2(X_cov, Y):
@@ -37,27 +55,21 @@ def _ols_r2(X_cov, Y):
 
 def find_stable_multivariate_genes(
     X, covariates,
-    fdr_alpha=0.05, n_bootstrap=500, min_r2=0.05,
+    n_bootstrap=500, min_r2=0.05,
     cv_threshold_pct=30.0, random_state=2137,
 ):
     valid = covariates.dropna(how='any').index.intersection(X.index)
     X = X.loc[valid]
     X_cov = covariates.loc[valid].values.astype(float)
     Y = X.values
-    n, p = X_cov.shape
-
-    _, r2 = _ols_r2(X_cov, Y)
-    F = (r2 / p) / ((1 - r2) / (n - p - 1))
-    pvals = stats.f.sf(F, p, n - p - 1)
-    rejected, _, _, _ = multipletests(pvals, alpha=fdr_alpha, method='fdr_bh')
-    Y_cand = Y[:, rejected]
-    cand_names = X.columns[rejected].tolist()
+    n = X_cov.shape[0]
+    cand_names = X.columns.tolist()
 
     rng = np.random.default_rng(random_state)
     r2_boot = np.empty((n_bootstrap, len(cand_names)))
     for b in range(n_bootstrap):
         idx = rng.integers(0, n, size=n)
-        _, r2_boot[b] = _ols_r2(X_cov[idx], Y_cand[idx])
+        _, r2_boot[b] = _ols_r2(X_cov[idx], Y[idx])
 
     median_r2 = np.median(r2_boot, axis=0)
     cv_pct = np.std(r2_boot, axis=0, ddof=1) / np.abs(median_r2) * 100
@@ -70,13 +82,12 @@ def find_stable_multivariate_genes(
     }).reset_index(drop=True)
 
 
-class MultiCovariateResidualBootstrapTransformer(BaseEstimator, TransformerMixin):
+class CovariateResidualizer(BaseEstimator, TransformerMixin):
     def __init__(self, covariates, labels=None,
-                 fdr_alpha=0.05, n_bootstrap=500, min_r2=0.05,
+                 n_bootstrap=500, min_r2=0.05,
                  cv_threshold_pct=30.0, random_state=2137):
         self.covariates = covariates
         self.labels = labels
-        self.fdr_alpha = fdr_alpha
         self.n_bootstrap = n_bootstrap
         self.min_r2 = min_r2
         self.cv_threshold_pct = cv_threshold_pct
@@ -92,7 +103,7 @@ class MultiCovariateResidualBootstrapTransformer(BaseEstimator, TransformerMixin
 
         stable = find_stable_multivariate_genes(
             X.loc[valid], cov.loc[valid],
-            fdr_alpha=self.fdr_alpha, n_bootstrap=self.n_bootstrap,
+            n_bootstrap=self.n_bootstrap,
             min_r2=self.min_r2, cv_threshold_pct=self.cv_threshold_pct,
             random_state=self.random_state,
         )

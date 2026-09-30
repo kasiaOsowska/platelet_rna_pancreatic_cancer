@@ -37,7 +37,7 @@ def show_report(y_pred, y_test_encoded, dataset, le):
 
     eval_df = pd.DataFrame({"y_true": y_true, "y_pred": y_pred_s})
     class_map = dict(zip(le.classes_, le.transform(le.classes_)))
-    print("Mapowanie klas:", class_map)
+    print("Class mapping:", class_map)
 
     results = {}
 
@@ -410,7 +410,7 @@ def plot_group_overview(splits: dict, colors: dict = None, title: str = None,
             fig.write_html(str(save_path))
         else:
             fig.write_image(str(save_path), scale=2)
-        print(f"[OK] zapisano: {save_path.resolve()}")
+        print(f"[OK] saved: {save_path.resolve()}")
 
     if show:
         fig.show()
