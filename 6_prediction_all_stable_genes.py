@@ -64,11 +64,11 @@ from utilz.multi_residual_bootstrap import (
 
 meta_path        = r"../data/samples_pancreatic.xlsx"
 data_path        = r"../data/counts_pancreatic.csv"
-GENES_CSV        = "3_forward_selection/forward_selection_genes.csv"
+GENES_CSV        = "2_stable_selection_with_enet/stability_all_stable_genes.csv"
 
 TEST_SIZE  = 0.2
 VALID_SIZE = 0.2
-BASE_SEED         = 2137
+BASE_SEED = 2137
 
 GRID_CV_FOLDS     = 30
 N_JOBS            = -1

@@ -134,7 +134,7 @@ class CovariateResidualizer(BaseEstimator, TransformerMixin):
         return np.asarray(input_features, dtype=object)
 
 
-def build_covariates(meta, age='Age', sex='Sex', libsize='Lib.size', ptprc='PTPRC'):
+def build_covariates(meta, age='Age', sex='Sex', libsize='Lib.size'):
     return pd.DataFrame({
         'age':           meta[age].astype(float),
         'sex':           meta[sex].map({'F': 0, 'M': 1}).astype(float),

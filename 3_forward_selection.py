@@ -4,13 +4,15 @@ Methodology: reuses the split and label encoding of 2_stable_selection_with_enet
 The stable genes are taken from the raw (not covariate-corrected) matrix and
 standardized per column. Candidates are the
 genes that passed stability selection. At each step the gene whose addition maximizes
-the mean cross-validated AUC of a logistic regression on the training set is appended
-to the panel; folds come from the dataset's multi-criteria stratified k-fold and are
-computed once so the steps stay comparable. Holdout test AUC is reported alongside but
-never used for selection. The procedure stops at TOP_K_FINAL genes.
+the validation-set AUC of a logistic regression fitted on the whole training set is
+appended to the panel. Holdout test AUC is reported alongside but never used for
+selection. The procedure stops at TOP_K_FINAL genes.
 """
 
 import warnings
+
+from utilz.multi_residual_bootstrap import CovariateResidualizer, build_covariates
+
 warnings.filterwarnings('ignore')
 
 import os
@@ -42,59 +44,45 @@ BASE_SEED  = 2137
 
 STABLE_GENES_CSV = "2_stable_selection_with_enet/stability_all_stable_genes.csv"
 TOP_K_FINAL      = 12
-SELECT_CV_FOLDS  = 10
 
 OUT_CSV_PATH = f"{OUT_DIR}/forward_selection_genes.csv"
 OUT_PNG_PATH = f"{OUT_DIR}/forward_selection_auc.png"
 
 
-def cv_auc_train(X, y, idx, folds, seed=BASE_SEED):
-    aucs = []
-    Xi = X[:, idx]
-    for tr, va in folds:
-        mdl = LogisticRegression(
-            max_iter=20000, class_weight='balanced', random_state=seed,
-        ).fit(Xi[tr], y[tr])
-        aucs.append(roc_auc_score(y[va], mdl.predict_proba(Xi[va])[:, 1]))
-    return float(np.mean(aucs)), float(np.std(aucs, ddof=1))
-
-
-def test_auc(X_tr, y_tr, X_te, y_te, idx, seed=BASE_SEED):
+def holdout_auc(X_tr, y_tr, X_ho, y_ho, idx, seed=BASE_SEED):
     mdl = LogisticRegression(
         max_iter=20000, class_weight='balanced', random_state=seed,
     ).fit(X_tr[:, idx], y_tr)
-    return float(roc_auc_score(y_te, mdl.predict_proba(X_te[:, idx])[:, 1]))
+    return float(roc_auc_score(y_ho, mdl.predict_proba(X_ho[:, idx])[:, 1]))
 
 
-def forward_select(X_tr, y_tr, candidate_idx, gene_names, k_max,
-                   folds, seed=BASE_SEED,
-                   X_te=None, y_te=None):
+def forward_select(X_tr, y_tr, X_va, y_va, candidate_idx, gene_names, k_max,
+                   seed=BASE_SEED, X_te=None, y_te=None):
     selected = []
     remaining = list(candidate_idx)
     rows = []
     k_max = min(k_max, len(remaining))
 
     for step in range(1, k_max + 1):
-        best_col, best_auc, best_std = None, -np.inf, np.nan
+        best_col, best_auc = None, -np.inf
         for col in remaining:
             trial = selected + [col]
-            auc_mean, auc_std = cv_auc_train(X_tr, y_tr, trial, folds, seed)
-            if auc_mean > best_auc:
-                best_col, best_auc, best_std = col, auc_mean, auc_std
+            auc_va = holdout_auc(X_tr, y_tr, X_va, y_va, trial, seed)
+            if auc_va > best_auc:
+                best_col, best_auc = col, auc_va
 
         selected.append(best_col)
         remaining.remove(best_col)
 
         row = {
-            'step':     step,
-            'gene':     gene_names[best_col],
-            'auc_mean': best_auc,
-            'auc_std':  best_std,
+            'step':      step,
+            'gene':      gene_names[best_col],
+            'auc_valid': best_auc,
         }
         msg = (f"  +{step:>2}  {gene_names[best_col]:<18}"
-               f"  CV AUC(train) = {best_auc:.4f}+-{best_std:.4f}")
+               f"  valid AUC = {best_auc:.4f}")
         if X_te is not None and y_te is not None:
-            row['auc_test'] = test_auc(X_tr, y_tr, X_te, y_te, selected, seed)
+            row['auc_test'] = holdout_auc(X_tr, y_tr, X_te, y_te, selected, seed)
             msg += f"  | test AUC = {row['auc_test']:.4f}"
         rows.append(row)
         print(msg)
@@ -110,9 +98,8 @@ X_tr_raw, X_te_raw, X_va_raw, y_train, y_test, y_valid = ds.get_train_test_valid
     ds.X, y_enc, test_size=TEST_SIZE, valid_size=VALID_SIZE,
     random_state=BASE_SEED,
 )
-X_te_raw = pd.concat([X_te_raw, X_va_raw])
-y_test   = pd.concat([y_test, y_valid])
 print(f"Train: {len(X_tr_raw)}  cancer={int(y_train.sum())} ctrl={int((y_train==0).sum())}")
+print(f"Valid: {len(X_va_raw)}  cancer={int(y_valid.sum())}  ctrl={int((y_valid==0).sum())}")
 print(f"Test:  {len(X_te_raw)}  cancer={int(y_test.sum())}  ctrl={int((y_test==0).sum())}")
 
 stable_df = pd.read_csv(STABLE_GENES_CSV)
@@ -124,22 +111,29 @@ if missing:
 print(f"[forward] candidate pool: {len(genes)} genes  -> selecting {TOP_K_FINAL}")
 
 X_tr_df = X_tr_raw[genes]
+X_va_df = X_va_raw[genes]
 X_te_df = X_te_raw[genes]
+cov = build_covariates(ds.meta)
+
 scale_pipe = Pipeline([
+    ('multi_resid', CovariateResidualizer(
+        covariates=cov, labels=y_train,
+        n_bootstrap=1000, min_r2=0.05, cv_threshold_pct=30.0,
+    )),
     ('scaler', StandardScaler()),
 ])
 X_tr_z = scale_pipe.fit_transform(X_tr_df)
+X_va_z = scale_pipe.transform(X_va_df)
 X_te_z = scale_pipe.transform(X_te_df)
 y_tr_np = y_train.values
+y_va_np = y_valid.values
 y_te_np = y_test.values
 
-print(f"\n=== forward selection (CV AUC on train, {SELECT_CV_FOLDS}-fold) ===")
+print(f"\n=== forward selection (AUC on validation set) ===")
 candidate_idx = list(range(len(genes)))
-folds = ds.get_stratified_kfold(X_tr_df, y_train, n_splits=SELECT_CV_FOLDS, random_state=BASE_SEED)
 selected_idx, fs_df = forward_select(
-    X_tr_z, y_tr_np, candidate_idx, genes, k_max=TOP_K_FINAL,
-    folds=folds, seed=BASE_SEED,
-    X_te=X_te_z, y_te=y_te_np,
+    X_tr_z, y_tr_np, X_va_z, y_va_np, candidate_idx, genes, k_max=TOP_K_FINAL,
+    seed=BASE_SEED, X_te=X_te_z, y_te=y_te_np,
 )
 selected_genes = [genes[i] for i in selected_idx]
 print(f"\nSelected {len(selected_genes)} genes (in order of selection):")
@@ -150,9 +144,8 @@ fs_df.to_csv(OUT_CSV_PATH, index=False)
 print(f"\n[OK] order + AUC -> {OUT_CSV_PATH}")
 
 fig, ax = plt.subplots(figsize=(8, 4.5))
-ax.errorbar(fs_df['step'], fs_df['auc_mean'], yerr=fs_df['auc_std'],
-            marker='o', capsize=3,
-            label=f'CV AUC ({SELECT_CV_FOLDS}-fold, train)')
+ax.plot(fs_df['step'], fs_df['auc_valid'],
+        marker='D', color='tab:orange', label='Validation AUC (selection)')
 if 'auc_test' in fs_df.columns:
     ax.plot(fs_df['step'], fs_df['auc_test'],
             marker='s', linestyle='--', color='tab:green',

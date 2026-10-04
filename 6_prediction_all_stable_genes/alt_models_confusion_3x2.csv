@@ -1,0 +1,13 @@
+model,youden_threshold,true_group,pred_Asymptomatic controls,pred_Pancreatic cancer
+logreg_elasticnet,0.3346,Asymptomatic controls,72,11
+logreg_elasticnet,0.3346,Pancreatic diseases,6,3
+logreg_elasticnet,0.3346,Pancreatic cancer,7,14
+svm_rbf,0.0497,Asymptomatic controls,59,24
+svm_rbf,0.0497,Pancreatic diseases,4,5
+svm_rbf,0.0497,Pancreatic cancer,3,18
+xgboost,0.2127,Asymptomatic controls,74,9
+xgboost,0.2127,Pancreatic diseases,7,2
+xgboost,0.2127,Pancreatic cancer,10,11
+stacking,0.1936,Asymptomatic controls,70,13
+stacking,0.1936,Pancreatic diseases,6,3
+stacking,0.1936,Pancreatic cancer,5,16
